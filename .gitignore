@@ -1,2 +1,6 @@
 .env
+data
 data/
+.claude/
+.claude-flow/
+.DS_Store
