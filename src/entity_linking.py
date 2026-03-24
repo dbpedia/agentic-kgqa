@@ -11,7 +11,7 @@ class RedisEntityLinking:
     
     def __init__(self, host=None, port=None, password=None):
         self.host = host or os.environ.get('NEF_REDIS_HOST')
-        self.port = port or os.environ.get('NEF_REDIS_PORT')
+        self.port = port or os.environ.get('NEF_REDIS_PORT', 6379)
         self.password = password or os.environ.get('NEF_REDIS_PASSWORD')
         self.redis_forms = redis.Redis(host=self.host, port=self.port, password=self.password, db=0, decode_responses=True)
         self.redis_redir = redis.Redis(host=self.host, port=self.port, password=self.password, db=1, decode_responses=True)

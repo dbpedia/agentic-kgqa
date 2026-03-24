@@ -8,6 +8,11 @@ gensim = "*"
 rdflib = "*"
 openai = "*"
 dotenv = "*"
+redis = "*"
+fastapi = "*"
+uvicorn = "*"
+pyyaml = "*"
+pandas = "*"
 
 [dev-packages]
 ipykernel = "*"
