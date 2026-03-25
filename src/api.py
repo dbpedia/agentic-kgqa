@@ -236,7 +236,7 @@ HTML_PAGE = """\
 
   /* Eval results */
   .eval-summary {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem;
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: .5rem;
     margin-bottom: 1rem;
   }
   .eval-stat {
@@ -290,6 +290,7 @@ HTML_PAGE = """\
   <div class="tabs">
     <button class="tab active" onclick="switchTab('ask')">Ask</button>
     <button class="tab" onclick="switchTab('eval')">Evaluate</button>
+    <button class="tab" onclick="switchTab('history')">History</button>
   </div>
 
   <!-- Ask tab -->
@@ -330,7 +331,7 @@ HTML_PAGE = """\
     <div id="eval-single" style="display:none">
       <div id="eval-summary"></div>
       <table class="eval-table" id="eval-table">
-        <thead><tr><th>#</th><th>Question</th><th>BGP</th><th>Inner</th><th>Outer</th><th>Match</th></tr></thead>
+        <thead><tr><th>#</th><th>Question</th><th>Nodes</th><th>Preds</th><th>Inner</th><th>Outer</th><th>Match</th></tr></thead>
         <tbody id="eval-body"></tbody>
       </table>
     </div>
@@ -339,6 +340,13 @@ HTML_PAGE = """\
       <canvas id="eval-chart" width="760" height="340" style="margin-bottom:1.5rem"></canvas>
       <div id="eval-model-cards"></div>
     </div>
+  </div>
+
+  <!-- History tab -->
+  <div id="tab-history" class="tab-content">
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:1rem">Performance across prompt versions. Each point is a full-benchmark eval (n=100).</p>
+    <canvas id="history-chart" style="width:100%;max-width:760px;height:380px;margin-bottom:1.5rem"></canvas>
+    <div id="history-table-wrap"></div>
   </div>
 </div>
 
@@ -521,6 +529,7 @@ function switchTab(tab) {
   document.querySelector(`.tab[onclick="switchTab('${tab}')"]`).classList.add('active');
   document.getElementById('tab-' + tab).classList.add('active');
   if (tab === 'eval') refreshPastRuns();
+  if (tab === 'history') loadHistory();
 }
 
 // --- Past runs ---
@@ -535,7 +544,8 @@ function refreshPastRuns() {
         ? `All (${r.models_count} models, n=${r.n})`
         : `${(r.model || '').split('/').pop()} (n=${r.n})`;
       const acc = r.accuracy != null ? `<span class="pr-acc">${r.accuracy}%</span>` : '';
-      html += `<span class="past-run" onclick="loadSavedResult('${r.id}')" title="${ts}">${label} ${acc}</span>`;
+      const ver = r.prompt_version ? `<span style="font-size:.65rem;color:var(--green);font-weight:700">${r.prompt_version}</span>` : '';
+      html += `<span class="past-run" onclick="loadSavedResult('${r.id}')" title="${ts}">${ver} ${label} ${acc}</span>`;
     }
     html += '</div></details>';
     el.innerHTML = html;
@@ -584,7 +594,8 @@ function renderSavedAll(data) {
         <div style="font-weight:600;font-size:.9rem;margin-bottom:.4rem">${escHtml(m.model_label)}</div>
         <div style="display:flex;gap:1.2rem;font-size:.8rem;color:var(--muted)">
           <span>Match: <b style="color:var(--accent)">${m.summary.accuracy}%</b></span>
-          <span>BGP: <b>${m.summary.bgp_accuracy}%</b></span>
+          <span>Nodes: <b>${m.summary.bgp_nodes_accuracy ?? m.summary.bgp_accuracy ?? 0}%</b></span>
+          <span>Preds: <b>${m.summary.bgp_predicates_accuracy ?? m.summary.bgp_accuracy ?? 0}%</b></span>
           <span>Inner: <b>${m.summary.inner_ops_accuracy}%</b></span>
           <span>Outer: <b>${m.summary.outer_ops_accuracy}%</b></span>
         </div>
@@ -631,7 +642,8 @@ function runEvalSingle(es, done, prog) {
 
   es.addEventListener('eval_start', e => {
     const d = JSON.parse(e.data).data;
-    prog.innerHTML = `<span class="spinner"></span> Evaluating ${d.total} questions with ${d.model} (judge: ${d.judge})...`;
+    const ver = d.prompt_version ? ` [${d.prompt_version}]` : '';
+    prog.innerHTML = `<span class="spinner"></span> Evaluating ${d.total} questions with ${d.model}${ver} (judge: ${d.judge})...`;
   });
 
   es.addEventListener('eval_progress', e => {
@@ -669,7 +681,8 @@ function runEvalAll(es, done, prog) {
   es.addEventListener('eval_all_start', e => {
     const d = JSON.parse(e.data).data;
     totalModels = d.models.length;
-    prog.innerHTML = `<span class="spinner"></span> Comparing ${totalModels} models on ${d.total_questions} questions (judge: ${d.judge})...`;
+    const ver = d.prompt_version ? ` [${d.prompt_version}]` : '';
+    prog.innerHTML = `<span class="spinner"></span> Comparing ${totalModels} models${ver} on ${d.total_questions} questions (judge: ${d.judge})...`;
   });
 
   es.addEventListener('eval_model_start', e => {
@@ -729,7 +742,8 @@ function makeEvalRow(d) {
         <div class="eval-detail"><b>Expected:</b>\\n${escHtml(d.expected)}\\n\\n<b>Generated:</b>\\n${escHtml(d.generated)}\\n\\n<b>Explanation:</b> ${escHtml(c.explanation || '')}</div>
       </details>
     </td>
-    <td>${badge(c.bgp)}</td>
+    <td>${badge(c.bgp_nodes ?? c.bgp)}</td>
+    <td>${badge(c.bgp_predicates ?? c.bgp)}</td>
     <td>${badge(c.inner_ops)}</td>
     <td>${badge(c.outer_ops)}</td>
     <td>${badge(c.match)}</td>`;
@@ -737,11 +751,15 @@ function makeEvalRow(d) {
 }
 
 function makeSummaryCards(d) {
+  // Handle both old (bgp_accuracy) and new (bgp_nodes/bgp_predicates) formats
+  const nodes = d.bgp_nodes_accuracy != null ? d.bgp_nodes_accuracy : d.bgp_accuracy || 0;
+  const preds = d.bgp_predicates_accuracy != null ? d.bgp_predicates_accuracy : d.bgp_accuracy || 0;
   return `<div class="eval-summary">
     <div class="eval-stat"><div class="val" style="color:var(--accent)">${d.accuracy}%</div><div class="lbl">Overall match</div></div>
-    <div class="eval-stat"><div class="val">${d.bgp_accuracy}%</div><div class="lbl">Graph patterns</div></div>
-    <div class="eval-stat"><div class="val">${d.inner_ops_accuracy}%</div><div class="lbl">Inner operators</div></div>
-    <div class="eval-stat"><div class="val">${d.outer_ops_accuracy}%</div><div class="lbl">Outer operators</div></div>
+    <div class="eval-stat"><div class="val">${nodes}%</div><div class="lbl">BGP Nodes</div></div>
+    <div class="eval-stat"><div class="val">${preds}%</div><div class="lbl">BGP Predicates</div></div>
+    <div class="eval-stat"><div class="val">${d.inner_ops_accuracy}%</div><div class="lbl">Inner ops</div></div>
+    <div class="eval-stat"><div class="val">${d.outer_ops_accuracy}%</div><div class="lbl">Outer ops</div></div>
   </div>`;
 }
 
@@ -759,8 +777,8 @@ function drawComparisonChart(models) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, W, H);
 
-  const axes = ['accuracy', 'bgp_accuracy', 'inner_ops_accuracy', 'outer_ops_accuracy'];
-  const axisLabels = ['Overall Match', 'Graph Patterns', 'Inner Operators', 'Outer Operators'];
+  const axes = ['accuracy', 'bgp_nodes_accuracy', 'bgp_predicates_accuracy', 'inner_ops_accuracy', 'outer_ops_accuracy'];
+  const axisLabels = ['Overall', 'BGP Nodes', 'BGP Preds', 'Inner ops', 'Outer ops'];
   const n = models.length;
 
   // Layout constants
@@ -799,7 +817,12 @@ function drawComparisonChart(models) {
 
     // Bars
     for (let mi = 0; mi < n; mi++) {
-      const val = models[mi].summary[axes[gi]] || 0;
+      const s = models[mi].summary;
+      let val = s[axes[gi]];
+      // Fallback: old results have bgp_accuracy instead of bgp_nodes/bgp_predicates
+      if (val == null && axes[gi] === 'bgp_nodes_accuracy') val = s.bgp_accuracy;
+      if (val == null && axes[gi] === 'bgp_predicates_accuracy') val = s.bgp_accuracy;
+      val = val || 0;
       const x = barsStart + mi * (barW + barGap);
       const h = Math.max(1, (val / 100) * chartH);
       const color = CHART_COLORS[mi % CHART_COLORS.length];
@@ -848,6 +871,161 @@ function drawComparisonChart(models) {
 
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// --- History tab ---
+const HISTORY_COLORS = {
+  accuracy: '#6366f1',
+  bgp_nodes_accuracy: '#22c55e',
+  bgp_predicates_accuracy: '#f59e0b',
+  inner_ops_accuracy: '#3b82f6',
+  outer_ops_accuracy: '#ec4899',
+};
+const HISTORY_LABELS = {
+  accuracy: 'Overall',
+  bgp_nodes_accuracy: 'BGP Nodes',
+  bgp_predicates_accuracy: 'BGP Preds',
+  inner_ops_accuracy: 'Inner ops',
+  outer_ops_accuracy: 'Outer ops',
+};
+
+function loadHistory() {
+  fetch('/eval-results').then(r => r.json()).then(runs => {
+    // Filter to single-model full benchmarks (n>=50) with a prompt_version, pick best per version+model
+    const eligible = runs.filter(r => r.mode === 'single' && r.n >= 50 && r.prompt_version);
+    if (eligible.length === 0) {
+      document.getElementById('history-table-wrap').innerHTML = '<p style="color:var(--muted);font-size:.85rem">No full benchmark runs with version tracking found yet. Run a full benchmark from the Evaluate tab first.</p>';
+      return;
+    }
+    // Load full data for each
+    Promise.all(eligible.map(r => fetch('/eval-results/' + encodeURIComponent(r.id)).then(x => x.json())))
+      .then(fullRuns => {
+        // Group by prompt_version, pick latest per version+model
+        const byKey = {};
+        for (const run of fullRuns) {
+          const key = `${run.prompt_version}__${run.model}`;
+          if (!byKey[key] || run.timestamp > byKey[key].timestamp) {
+            byKey[key] = run;
+          }
+        }
+        const points = Object.values(byKey).sort((a, b) => (a.prompt_version || '').localeCompare(b.prompt_version || '') || (a.timestamp || '').localeCompare(b.timestamp || ''));
+        drawHistoryChart(points);
+        drawHistoryTable(points);
+      });
+  });
+}
+
+function drawHistoryChart(points) {
+  const canvas = document.getElementById('history-chart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  if (points.length === 0) return;
+
+  const metrics = Object.keys(HISTORY_COLORS);
+  const chartLeft = 50, chartRight = W - 20, chartTop = 20, chartBot = H - 70;
+  const chartW = chartRight - chartLeft, chartH = chartBot - chartTop;
+
+  // X axis: one position per point (version + model)
+  const xLabels = points.map(p => `${p.prompt_version} (${(p.model || '').split('/').pop()})`);
+  const xStep = chartW / Math.max(points.length - 1, 1);
+
+  // Grid
+  ctx.strokeStyle = '#2a2d3a'; ctx.lineWidth = 1;
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#8b8d97';
+  for (let pct = 0; pct <= 100; pct += 25) {
+    const y = chartBot - (pct / 100) * chartH;
+    ctx.beginPath(); ctx.moveTo(chartLeft, y); ctx.lineTo(chartRight, y); ctx.stroke();
+    ctx.textAlign = 'right'; ctx.fillText(pct + '%', chartLeft - 8, y + 4);
+  }
+
+  // X labels
+  ctx.textAlign = 'center'; ctx.fillStyle = '#e4e4e7'; ctx.font = '10px system-ui';
+  for (let i = 0; i < points.length; i++) {
+    const x = chartLeft + i * xStep;
+    ctx.save();
+    ctx.translate(x, chartBot + 10);
+    ctx.rotate(-0.4);
+    ctx.textAlign = 'right';
+    ctx.fillText(xLabels[i], 0, 0);
+    ctx.restore();
+  }
+
+  // Lines + dots for each metric
+  for (const metric of metrics) {
+    const color = HISTORY_COLORS[metric];
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.fillStyle = color;
+
+    ctx.beginPath();
+    for (let i = 0; i < points.length; i++) {
+      const x = chartLeft + i * xStep;
+      // Handle both old (bgp_accuracy) and new (bgp_nodes_accuracy) formats
+      const s = points[i].summary || {};
+      let val = s[metric];
+      if (val == null && metric === 'bgp_nodes_accuracy') val = s.bgp_accuracy;
+      if (val == null && metric === 'bgp_predicates_accuracy') val = s.bgp_accuracy;
+      if (val == null) val = 0;
+      const y = chartBot - (val / 100) * chartH;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Dots with value labels
+    for (let i = 0; i < points.length; i++) {
+      const x = chartLeft + i * xStep;
+      const s = points[i].summary || {};
+      let val = s[metric];
+      if (val == null && metric === 'bgp_nodes_accuracy') val = s.bgp_accuracy;
+      if (val == null && metric === 'bgp_predicates_accuracy') val = s.bgp_accuracy;
+      if (val == null) val = 0;
+      const y = chartBot - (val / 100) * chartH;
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText(Math.round(val), x, y - 8);
+      ctx.fillStyle = color;
+    }
+  }
+
+  // Legend
+  const legendY = H - 10;
+  let lx = chartLeft;
+  ctx.font = '11px system-ui';
+  for (const metric of metrics) {
+    ctx.fillStyle = HISTORY_COLORS[metric];
+    ctx.fillRect(lx, legendY - 8, 10, 10);
+    ctx.fillStyle = '#e4e4e7'; ctx.textAlign = 'left';
+    const label = HISTORY_LABELS[metric];
+    ctx.fillText(label, lx + 14, legendY);
+    lx += ctx.measureText(label).width + 28;
+  }
+}
+
+function drawHistoryTable(points) {
+  let html = '<table class="eval-table"><thead><tr><th>Version</th><th>Model</th><th>Date</th><th>Overall</th><th>Nodes</th><th>Preds</th><th>Inner</th><th>Outer</th></tr></thead><tbody>';
+  for (const p of points) {
+    const s = p.summary || {};
+    const model = (p.model || '').split('/').pop();
+    const date = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
+    const nodes = s.bgp_nodes_accuracy ?? s.bgp_accuracy ?? '—';
+    const preds = s.bgp_predicates_accuracy ?? s.bgp_accuracy ?? '—';
+    html += `<tr>
+      <td><b style="color:var(--green)">${p.prompt_version || '?'}</b></td>
+      <td>${escHtml(model)}</td>
+      <td style="color:var(--muted)">${date}</td>
+      <td><b style="color:var(--accent)">${s.accuracy ?? '—'}%</b></td>
+      <td>${nodes}%</td>
+      <td>${preds}%</td>
+      <td>${s.inner_ops_accuracy ?? '—'}%</td>
+      <td>${s.outer_ops_accuracy ?? '—'}%</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('history-table-wrap').innerHTML = html;
 }
 </script>
 </body>

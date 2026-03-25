@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 DBPEDIA_SPARQL_ENDPOINT = "http://localhost:7878/query"
 
+PROMPT_VERSION = "v3"
+
 SYSTEM_PROMPT = """\
 You are a SPARQL query generation agent for DBpedia (2015-10 snapshot).
 Your job is to translate natural language questions into valid SPARQL queries.
@@ -55,19 +57,36 @@ Rules:
   that are illegal in prefixed form.
 - Common URI bases:
   Resources: <http://dbpedia.org/resource/...>
-  Ontology:  <http://dbpedia.org/ontology/...>
-  Property:  <http://dbpedia.org/property/...>
+  Ontology:  <http://dbpedia.org/ontology/...> (dbo — curated, preferred)
+  Property:  <http://dbpedia.org/property/...> (dbp — raw infobox data)
   RDF type:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+- NAMESPACE SELECTION: When both dbo: and dbp: candidates exist for a property, prefer dbo: (ontology)
+  unless the ontology lookup results show ONLY a dbp: match with no dbo: equivalent.
+  Do NOT invent property names — use URIs from the ontology lookup results provided to you.
+- ALWAYS use SELECT DISTINCT for queries that return resource URIs or literal values.
 - For boolean questions, use ASK WHERE { ... }.
-- For count questions, use SELECT COUNT(...) or SELECT (COUNT(...) AS ?count).
-- For list questions, use SELECT DISTINCT.
-- Prefer ontology properties over dbp: properties when both are available.
+- For count questions, use SELECT (COUNT(DISTINCT ?var) AS ?count).
 - Output ONLY the SPARQL query, no explanations.
 
-Example — for "What is the birthplace of Keanu Reeves?":
+Example 1 — "What is the birthplace of Keanu Reeves?" (uses dbo:):
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   <http://dbpedia.org/resource/Keanu_Reeves> <http://dbpedia.org/ontology/birthPlace> ?uri .
+}
+```
+
+Example 2 — "Who are the managers of LeBron James's teams?" (uses dbp: because dbp:manager is the correct property):
+```sparql
+SELECT DISTINCT ?uri WHERE {
+  <http://dbpedia.org/resource/LeBron_James> <http://dbpedia.org/property/team> ?team .
+  ?team <http://dbpedia.org/property/manager> ?uri .
+}
+```
+
+Example 3 — "Is the Eiffel Tower in Paris?" (ASK query):
+```sparql
+ASK WHERE {
+  <http://dbpedia.org/resource/Eiffel_Tower> <http://dbpedia.org/ontology/location> <http://dbpedia.org/resource/Paris> .
 }
 ```
 """
@@ -83,7 +102,7 @@ def _get_llm_client():
 DEFAULT_MODEL = "google/gemini-2.0-flash-001"
 
 MODELS = [
-    # {"id": "google/gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+    {"id": "google/gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
     {"id": "anthropic/claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
     {"id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"},
     {"id": "deepseek/deepseek-v3.2", "label": "DeepSeek V3.2"},

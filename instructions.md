@@ -23,11 +23,16 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 
 ### KGQA Agent (`src/agent.py`)
 - 5-step pipeline: analyse question (LLM) -> entity linking (Redis) -> ontology lookup (embeddings) -> SPARQL generation (LLM) -> verify & revise
+- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v3**.
+  - v1: baseline — "prefer ontology properties over dbp:"
+  - v2: explicit namespace guidance (dbo vs dbp), instructs LLM to pick properties from ontology lookup results by score rather than defaulting to dbo:. **Regressed to 6%** — over-corrected toward dbp: and lost DISTINCT.
+  - v3: restores dbo: preference (use dbo when both exist), enforces SELECT DISTINCT, adds 3 diverse few-shot examples (dbo SELECT, dbp multi-hop, ASK). See `docs/analysis.md` for full regression analysis.
 - **Self-correcting queries**: after generating SPARQL, the agent executes it against the local DBpedia 2015-10 endpoint (`http://localhost:7878/query`). If the result is empty (0 results or COUNT=0) or errors, the agent asks the LLM to revise the query (up to 2 retries). Revision prefers **simplification** (dropping type constraints, swapping a single property) over adding UNIONs — the goal is to stay as close to the original translation as possible.
 - Streaming mode via `answer_stream()` that yields step-by-step events including revision steps
 - Full-URI output (no PREFIX shorthand) to avoid illegal SPARQL with special characters
 - Heuristic fallback when Redis is unavailable
-- **Model selector**: choose from mid-tier models across providers (Gemini, GPT-4o, Claude, Llama, DeepSeek, Qwen) via UI dropdown. Model list defined in `MODELS` constant; all routed through OpenRouter.
+- **Model selector**: choose from mid-tier models across providers (Claude, GPT, DeepSeek, Qwen, Gemma) via UI dropdown. Model list defined in `MODELS` constant; all routed through OpenRouter.
+- `max_tokens=2048` cap on all LLM calls to prevent runaway generation
 
 ### Ontology Lookup (`src/ontology_lookup.py`)
 - Semantic search over DBpedia ontology using precomputed embeddings (gensim KeyedVectors + OpenAI text-embedding-3-small)
@@ -38,8 +43,10 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 
 ### Evaluation (`src/evaluate.py`)
 - **LLM-based SPARQL comparison** using Claude Sonnet 4.6 as judge (always, regardless of generation model)
-- Compares generated vs expected queries on three axes: basic graph patterns (order-independent), inner-query operators (FILTER/VALUES/OPTIONAL/UNION), outer-query operators (SELECT/ASK/COUNT/ORDER BY/LIMIT/DISTINCT)
+- Compares generated vs expected queries on **four axes**: BGP nodes (entity URIs), BGP predicates (property URIs including namespace), inner-query operators (FILTER/VALUES/OPTIONAL/UNION), outer-query operators (SELECT/ASK/COUNT/ORDER BY/LIMIT/DISTINCT)
+- The node/predicate split reveals whether failures are due to wrong entities vs wrong properties (the main bottleneck is dbo/dbp namespace mismatches)
 - Variable names are ignored — only functional equivalence matters
+- **Prompt version tracking**: each eval result records the `prompt_version` used, enabling comparison across prompt iterations
 - Randomly samples N questions from the benchmark (`benchmark/questions_db25.yaml`, 100 questions)
 - Streams per-question results and summary stats (overall accuracy + per-axis breakdowns)
 - **"All models" comparison mode**: runs the same question sample across all 6 models, streams per-model results, and renders a grouped bar chart comparing accuracy across all axes. Per-model summary cards shown alongside the chart.
@@ -54,7 +61,8 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 - `GET /eval-results` — List saved evaluation results (metadata)
 - `GET /eval-results/{id}` — Load a full saved evaluation result
 - `GET /models` — Returns available models and default
-- `GET /` — Interactive web UI with Ask/Evaluate tabs, model selector, past runs browser, bar chart comparison, and live visualisation
+- `GET /` — Interactive web UI with Ask/Evaluate/History tabs, model selector, past runs browser, bar chart comparison, and live visualisation
+- **History tab**: line chart showing performance metrics across prompt versions, with a summary table. Loads from saved eval results automatically.
 
 ### Entity Linking (`src/entity_linking.py`)
 - Redis-backed surface form lookup with redirect resolution (from NEF)

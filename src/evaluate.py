@@ -30,13 +30,14 @@ Generated:
 {generated}
 
 Score each axis as true (equivalent) or false (different):
-1. bgp: Do they have the same basic graph patterns (same triple patterns, order doesn't matter)?
-2. inner_ops: Same inner-query operators (FILTER, VALUES, OPTIONAL, UNION)?
-3. outer_ops: Same outer-query structure (SELECT/ASK, COUNT, ORDER BY, LIMIT, DISTINCT)?
+1. bgp_nodes: Do they reference the same entity/resource URIs (subjects and objects)?
+2. bgp_predicates: Do they use the same properties/predicates, including the correct namespace (dbo: vs dbp:)?
+3. inner_ops: Same inner-query operators (FILTER, VALUES, OPTIONAL, UNION)?
+4. outer_ops: Same outer-query structure (SELECT/ASK, COUNT, ORDER BY, LIMIT, DISTINCT)?
 
-Overall match = all three are true.
+Overall match = all four are true.
 
-Output JSON only: {{"match": bool, "bgp": bool, "inner_ops": bool, "outer_ops": bool, "explanation": "brief reason"}}
+Output JSON only: {{"match": bool, "bgp_nodes": bool, "bgp_predicates": bool, "inner_ops": bool, "outer_ops": bool, "explanation": "brief reason"}}
 """
 
 
@@ -97,6 +98,7 @@ def list_results():
                 "mode": data.get("mode", "single"),
                 "model": data.get("model"),
                 "n": data.get("n"),
+                "prompt_version": data.get("prompt_version"),
                 "accuracy": data.get("summary", {}).get("accuracy") if data.get("mode") != "all" else None,
                 "models_count": len(data.get("models", [])) if data.get("mode") == "all" else None,
             })
@@ -141,7 +143,8 @@ def compare_sparql(generated, expected, client=None):
 
     return {
         "match": False,
-        "bgp": False,
+        "bgp_nodes": False,
+        "bgp_predicates": False,
         "inner_ops": False,
         "outer_ops": False,
         "explanation": f"Could not parse judge response: {text[:200]}",
@@ -161,7 +164,8 @@ def evaluate_stream(agent, n=10, model=None, shuffle=True):
         sample = questions[:n]
     judge_client = _get_judge_client()
 
-    yield ("eval_start", {"total": len(sample), "model": model or "default", "judge": JUDGE_MODEL})
+    from src.agent import PROMPT_VERSION
+    yield ("eval_start", {"total": len(sample), "model": model or "default", "judge": JUDGE_MODEL, "prompt_version": PROMPT_VERSION})
 
     results = []
     for i, item in enumerate(sample):
@@ -181,7 +185,8 @@ def evaluate_stream(agent, n=10, model=None, shuffle=True):
         # Compare
         if generated.startswith("ERROR:"):
             comparison = {
-                "match": False, "bgp": False, "inner_ops": False, "outer_ops": False,
+                "match": False, "bgp_nodes": False, "bgp_predicates": False,
+                "inner_ops": False, "outer_ops": False,
                 "explanation": generated,
             }
         else:
@@ -198,27 +203,15 @@ def evaluate_stream(agent, n=10, model=None, shuffle=True):
 
         yield ("eval_question", result)
 
-    # Summary
-    total = len(results)
-    matches = sum(1 for r in results if r["comparison"].get("match"))
-    bgp_matches = sum(1 for r in results if r["comparison"].get("bgp"))
-    inner_matches = sum(1 for r in results if r["comparison"].get("inner_ops"))
-    outer_matches = sum(1 for r in results if r["comparison"].get("outer_ops"))
-
-    summary = {
-        "total": total,
-        "matches": matches,
-        "accuracy": round(matches / total * 100, 1) if total else 0,
-        "bgp_accuracy": round(bgp_matches / total * 100, 1) if total else 0,
-        "inner_ops_accuracy": round(inner_matches / total * 100, 1) if total else 0,
-        "outer_ops_accuracy": round(outer_matches / total * 100, 1) if total else 0,
-    }
+    summary = _summarise(results)
     yield ("eval_done", summary)
 
     # Auto-save
+    from src.agent import PROMPT_VERSION
     result_id = save_result({
         "mode": "single",
         "model": model or "default",
+        "prompt_version": PROMPT_VERSION,
         "n": len(sample),
         "judge": JUDGE_MODEL,
         "questions": results,
@@ -231,16 +224,18 @@ def _summarise(results):
     """Compute accuracy stats from a list of per-question results."""
     total = len(results)
     if total == 0:
-        return {"total": 0, "matches": 0, "accuracy": 0, "bgp_accuracy": 0, "inner_ops_accuracy": 0, "outer_ops_accuracy": 0}
+        return {"total": 0, "matches": 0, "accuracy": 0, "bgp_nodes_accuracy": 0, "bgp_predicates_accuracy": 0, "inner_ops_accuracy": 0, "outer_ops_accuracy": 0}
     matches = sum(1 for r in results if r["comparison"].get("match"))
-    bgp = sum(1 for r in results if r["comparison"].get("bgp"))
+    bgp_nodes = sum(1 for r in results if r["comparison"].get("bgp_nodes"))
+    bgp_preds = sum(1 for r in results if r["comparison"].get("bgp_predicates"))
     inner = sum(1 for r in results if r["comparison"].get("inner_ops"))
     outer = sum(1 for r in results if r["comparison"].get("outer_ops"))
     return {
         "total": total,
         "matches": matches,
         "accuracy": round(matches / total * 100, 1),
-        "bgp_accuracy": round(bgp / total * 100, 1),
+        "bgp_nodes_accuracy": round(bgp_nodes / total * 100, 1),
+        "bgp_predicates_accuracy": round(bgp_preds / total * 100, 1),
         "inner_ops_accuracy": round(inner / total * 100, 1),
         "outer_ops_accuracy": round(outer / total * 100, 1),
     }
@@ -267,10 +262,12 @@ def evaluate_all_stream(agent, models, n=10, shuffle=True):
     model_ids = [m["id"] for m in models]
     model_labels = {m["id"]: m["label"] for m in models}
 
+    from src.agent import PROMPT_VERSION
     yield ("eval_all_start", {
         "total_questions": len(sample),
         "models": [{"id": m["id"], "label": m["label"]} for m in models],
         "judge": JUDGE_MODEL,
+        "prompt_version": PROMPT_VERSION,
     })
 
     all_model_summaries = []
@@ -302,7 +299,8 @@ def evaluate_all_stream(agent, models, n=10, shuffle=True):
 
             if generated.startswith("ERROR:"):
                 comparison = {
-                    "match": False, "bgp": False, "inner_ops": False, "outer_ops": False,
+                    "match": False, "bgp_nodes": False, "bgp_predicates": False,
+                    "inner_ops": False, "outer_ops": False,
                     "explanation": generated,
                 }
             else:
@@ -337,9 +335,11 @@ def evaluate_all_stream(agent, models, n=10, shuffle=True):
     yield ("eval_all_done", all_done_data)
 
     # Auto-save
+    from src.agent import PROMPT_VERSION
     result_id = save_result({
         "mode": "all",
         "model": "all",
+        "prompt_version": PROMPT_VERSION,
         "n": len(sample),
         "judge": JUDGE_MODEL,
         "questions": all_questions,
