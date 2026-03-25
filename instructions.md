@@ -23,10 +23,11 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 
 ### KGQA Agent (`src/agent.py`)
 - 5-step pipeline: analyse question (LLM) -> entity linking (Redis) -> ontology lookup (embeddings) -> SPARQL generation (LLM) -> verify & revise
-- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v3**.
+- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v4**.
   - v1: baseline — "prefer ontology properties over dbp:"
   - v2: explicit namespace guidance (dbo vs dbp), instructs LLM to pick properties from ontology lookup results by score rather than defaulting to dbo:. **Regressed to 6%** — over-corrected toward dbp: and lost DISTINCT.
-  - v3: restores dbo: preference (use dbo when both exist), enforces SELECT DISTINCT, adds 3 diverse few-shot examples (dbo SELECT, dbp multi-hop, ASK). See `docs/analysis.md` for full regression analysis.
+  - v3: restores dbo: preference (use dbo when both exist), enforces SELECT DISTINCT, adds 3 diverse few-shot examples (dbo SELECT, dbp multi-hop, ASK).
+  - v4: **frequency-weighted ontology lookup** — each property result now includes triple counts from the actual dataset. Prompt instructs LLM: "pick the property with more triples; never use 0-triple properties". 5 few-shot examples (added COUNT and ORDER BY+LIMIT patterns). See `docs/analysis.md` for full regression analysis.
 - **Self-correcting queries**: after generating SPARQL, the agent executes it against the local DBpedia 2015-10 endpoint (`http://localhost:7878/query`). If the result is empty (0 results or COUNT=0) or errors, the agent asks the LLM to revise the query (up to 2 retries). Revision prefers **simplification** (dropping type constraints, swapping a single property) over adding UNIONs — the goal is to stay as close to the original translation as possible.
 - Streaming mode via `answer_stream()` that yields step-by-step events including revision steps
 - Full-URI output (no PREFIX shorthand) to avoid illegal SPARQL with special characters
@@ -38,8 +39,10 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 - Semantic search over DBpedia ontology using precomputed embeddings (gensim KeyedVectors + OpenAI text-embedding-3-small)
 - **Covers both `dbo:` (ontology/) and `dbp:` (property/) namespaces** — 7,098 vectors total (3,572 dbo + 3,526 dbp)
 - Balanced results: returns a mix of dbo and dbp hits so the LLM can pick the right namespace
+- **Frequency-weighted annotations**: each result includes triple count from the actual dataset (`data/predicate_frequencies.json`). Enables data-informed namespace choices.
 - `dbp:` properties extracted from `data/infobox_properties_en.ttl` (filtered to ≥1,000 occurrences to exclude noise)
-- Reindex via `python scripts/reindex_ontology.py`
+- Rebuild frequencies: `python scripts/build_predicate_frequencies.py` (requires local SPARQL endpoint)
+- Reindex embeddings: `python scripts/reindex_ontology.py`
 
 ### Evaluation (`src/evaluate.py`)
 - **LLM-based SPARQL comparison** using Claude Sonnet 4.6 as judge (always, regardless of generation model)

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DBPEDIA_SPARQL_ENDPOINT = "http://localhost:7878/query"
 
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
 SYSTEM_PROMPT = """\
 You are a SPARQL query generation agent for DBpedia (2015-10 snapshot).
@@ -57,25 +57,28 @@ Rules:
   that are illegal in prefixed form.
 - Common URI bases:
   Resources: <http://dbpedia.org/resource/...>
-  Ontology:  <http://dbpedia.org/ontology/...> (dbo — curated, preferred)
+  Ontology:  <http://dbpedia.org/ontology/...> (dbo — curated, preferred when data exists)
   Property:  <http://dbpedia.org/property/...> (dbp — raw infobox data)
   RDF type:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
-- NAMESPACE SELECTION: When both dbo: and dbp: candidates exist for a property, prefer dbo: (ontology)
-  unless the ontology lookup results show ONLY a dbp: match with no dbo: equivalent.
+- PROPERTY SELECTION: The ontology lookup results include TRIPLE COUNTS from the actual dataset.
+  A property with 0 triples means NO data exists under that URI — NEVER use it.
+  When choosing between dbo: and dbp: for the same concept, pick the one with MORE triples.
+  If both have data, prefer dbo: unless dbp: has significantly more triples (10x+).
   Do NOT invent property names — use URIs from the ontology lookup results provided to you.
 - ALWAYS use SELECT DISTINCT for queries that return resource URIs or literal values.
 - For boolean questions, use ASK WHERE { ... }.
 - For count questions, use SELECT (COUNT(DISTINCT ?var) AS ?count).
+- For "top N" questions, use ORDER BY DESC(...) LIMIT N.
 - Output ONLY the SPARQL query, no explanations.
 
-Example 1 — "What is the birthplace of Keanu Reeves?" (uses dbo:):
+Example 1 — "What is the birthplace of Keanu Reeves?" (dbo: has more triples):
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   <http://dbpedia.org/resource/Keanu_Reeves> <http://dbpedia.org/ontology/birthPlace> ?uri .
 }
 ```
 
-Example 2 — "Who are the managers of LeBron James's teams?" (uses dbp: because dbp:manager is the correct property):
+Example 2 — "Who are the managers of LeBron James's teams?" (dbp: is the only property with data):
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   <http://dbpedia.org/resource/LeBron_James> <http://dbpedia.org/property/team> ?team .
@@ -88,6 +91,22 @@ Example 3 — "Is the Eiffel Tower in Paris?" (ASK query):
 ASK WHERE {
   <http://dbpedia.org/resource/Eiffel_Tower> <http://dbpedia.org/ontology/location> <http://dbpedia.org/resource/Paris> .
 }
+```
+
+Example 4 — "How many unique authors have written science fiction novels?" (COUNT):
+```sparql
+SELECT DISTINCT COUNT(?author) WHERE {
+  ?x <http://dbpedia.org/ontology/literaryGenre> <http://dbpedia.org/resource/Science_fiction> .
+  ?x <http://dbpedia.org/ontology/author> ?author .
+}
+```
+
+Example 5 — "What are the 10 most populated countries?" (ORDER BY + LIMIT):
+```sparql
+SELECT ?country WHERE {
+  ?country <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Country> .
+  ?country <http://dbpedia.org/ontology/populationTotal> ?population .
+} ORDER BY DESC(?population) LIMIT 10
 ```
 """
 
@@ -330,7 +349,9 @@ class KGQAAgent:
         for concept, results in ontology_terms.items():
             out += f"Concept \"{concept}\":\n"
             for r in results:
-                out += f"  - {r['uri']} ({r['type']}, score: {r['score']})\n"
+                triples = r.get('triples', 0)
+                t_str = f"{triples:,} triples" if triples else "0 triples"
+                out += f"  - {r['uri']} ({r['type']}, score: {r['score']}, {t_str})\n"
         return out
 
     def _generate_sparql(self, question, linked_entities, ontology_terms, analysis, model=None):

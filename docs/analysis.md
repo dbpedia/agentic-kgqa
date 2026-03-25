@@ -1,23 +1,24 @@
-# Evaluation Analysis: Prompt Evolution v1 → v2 → v3
+# Evaluation Analysis: Prompt Evolution v1 → v2 → v3 → v4
 
 ## Performance summary (DeepSeek V3.2, full benchmark N=100)
 
-| Metric | v1 | v2 | v3 | v1→v3 |
-|--------|:---:|:---:|:---:|:---:|
-| **Overall match** | 20.0% | 6.0% | **18.0%** | −2pp |
-| BGP Nodes | 25.0%* | 57.0% | **61.0%** | +36pp |
-| BGP Predicates | 25.0%* | 26.0% | **26.0%** | +1pp |
-| Inner operators | 84.0% | 81.0% | **79.0%** | −5pp |
-| Outer operators | 75.0% | 52.0% | **76.0%** | +1pp |
+| Metric | v1 | v2 | v3 | v4 | Best |
+|--------|:---:|:---:|:---:|:---:|:---:|
+| **Overall match** | 20.0% | 6.0% | **18.0%** | 12.0% | v1 (20%) |
+| BGP Nodes | 25.0%* | 57.0% | 61.0% | **67.0%** | v4 (67%) |
+| BGP Predicates | 25.0%* | 26.0% | 26.0% | **20.0%** | v3 (26%) |
+| Inner operators | **84.0%** | 81.0% | 79.0% | **85.0%** | v4 (85%) |
+| Outer operators | 75.0% | 52.0% | **76.0%** | 74.0% | v3 (76%) |
 
 *v1 had a single combined BGP metric (25.0%), shown in both columns for comparison.
 
 ## Version history
 
-### v1 — Baseline
+### v1 — Baseline (20%)
 - "Prefer ontology properties over dbp: when both are available"
 - Single example using `dbo:birthPlace`
 - No explicit DISTINCT rule
+- Namespace usage: dbo=83, dbp=25 (benchmark: dbo=76, dbp=38)
 
 ### v2 — Namespace over-correction (regression: 20% → 6%)
 **What changed**: removed dbo preference, told LLM to pick the higher-scoring ontology lookup result.
@@ -40,59 +41,82 @@
 - Outer ops fully recovered (52% → 76%), matching v1
 - BGP Nodes continued improving (57% → 61%)
 - BGP Predicates unchanged at 26% — the hard problem
+- Namespace usage: dbo≈70, dbp≈30 (closer to benchmark)
 
-## Current failure analysis (v3, 82 failures)
+### v4 — Frequency-weighted lookup (regression: 18% → 12%)
+**What changed**:
+1. Added triple counts from actual dataset to ontology lookup results (e.g. "dbo:director, 113,636 triples")
+2. Prompt rule: "pick the property with MORE triples; never use 0-triple properties"
+3. 5 few-shot examples (added COUNT and ORDER BY + LIMIT patterns)
+
+**What went wrong**:
+1. **Namespace flip again** (same v2 pattern): triple counts steered the model toward `dbp:` because many `dbp:` properties have MORE triples than their `dbo:` equivalents (e.g. `dbp:director` has 156k triples vs `dbo:director`'s 113k). The prompt said "pick the one with more triples" → model picked `dbp:` in 63 queries (v3 had 30).
+2. **11 regressions**: Q8 (Eiffel Tower location), Q12 (Boeing manufacturer), Q15 (Louvre director), Q53 (NYC HQ), Q55 (Inception director), Q68 (Eiffel Tower), Q72 (Bohemian Rhapsody), Q73 (California capital), Q85 (Tom Hanks wife) — all flipped from correct `dbo:` to incorrect `dbp:`
+3. **BGP Predicates dropped** from 26% to 20% — frequency data made the problem worse, not better
+
+**What went right**:
+- BGP Nodes improved again (61% → 67%) — the frequency data helps with entity-related properties
+- Inner ops improved (79% → 85%) — the new COUNT and ORDER BY examples helped
+- 5 questions improved: Q16, Q62, Q94, Q95, Q98
+
+## The namespace paradox
+
+| | v1 | v2 | v3 | v4 | Benchmark |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Queries using dbo: | 83 | 49 | ~70 | 53 | 76 |
+| Queries using dbp: | 25 | 63 | ~30 | 63 | 38 |
+
+**The core paradox**: the benchmark expects `dbo:` in 76% of questions, but `dbp:` properties often have MORE triples in the actual dataset. Any signal based on data frequency (triple counts, embedding scores) pushes the model toward `dbp:`, away from what the benchmark expects.
+
+This confirms the translation trade-off identified in v3 analysis:
+- The benchmark expects **schema-faithful** translations (using curated `dbo:` properties)
+- The data favours **data-faithful** translations (using raw `dbp:` properties with more coverage)
+- **Triple counts are anti-correlated with benchmark expectations for namespace choice**
+
+## Current failure analysis (v4, 88 failures)
 
 | Category | Count | % of failures |
 |---|:---:|:---:|
-| Nodes OK, Predicates FAIL | 37 | 45% |
-| Both nodes and predicates FAIL | 37 | 45% |
-| BGP OK, operators wrong | 6 | 7% |
-| Nodes FAIL, Predicates OK | 2 | 2% |
+| Nodes OK, Predicates FAIL | 51 | 58% |
+| Both nodes and predicates FAIL | 29 | 33% |
+| BGP OK, operators wrong | 4 | 5% |
+| Nodes FAIL, Predicates OK | 4 | 5% |
 
-### The predicate problem (74 failures, 90% of all failures)
+The predicate problem has gotten worse (51 pure predicate failures, up from 37 in v3). Frequency data actively misguides namespace selection.
 
-Predicates remain the dominant bottleneck. The 37 "nodes OK, predicates FAIL" cases are the clearest targets — the agent finds the right entities but picks the wrong property. The 37 "both FAIL" cases are more complex (wrong entity + wrong property, or structural mismatch).
+## Key learning: what signals work and what don't
 
-### The namespace split
+### Signals that HELP:
+- **Entity linking** (Redis surface form lookup) — BGP Nodes improved steadily: 25% → 57% → 61% → 67%
+- **Explicit structural rules** (DISTINCT, COUNT patterns) — Inner/outer ops are now solid when enforced
+- **Few-shot examples** — each new example pattern gets adopted well
 
-| | v1 | v2 | v3 | Benchmark |
-|---|:---:|:---:|:---:|:---:|
-| Queries using dbo: | 83 | 49 | ~70 | 76 |
-| Queries using dbp: | 25 | 63 | ~40 | 38 |
+### Signals that HURT:
+- **Embedding similarity scores** — `dbp:` scores inflate after reindex (v2 lesson)
+- **Triple counts** — anti-correlated with benchmark's namespace preference (v4 lesson)
+- **"Pick the higher/more" heuristics** — any ranking signal pushes toward `dbp:`
 
-v3 is closer to the benchmark distribution than either v1 or v2, but still not precise enough at the per-question level.
+### The fundamental issue:
+The benchmark's namespace preference is **not derivable from data statistics**. It appears to reflect the benchmark authors' modelling choice: prefer the curated ontology unless the data simply doesn't exist there. This is a **schema-level** decision, not a **data-level** one.
 
-## Key insight: the translation trade-off
+## Potential next steps (revised after v4)
 
-There is a fundamental tension between two goals:
+### High impact: fixing the namespace problem
 
-1. **Schema fidelity** — translate the question assuming the data conforms to the ontology. Use `dbo:` properties, add `rdf:type` constraints. Produces cleaner, more "correct" queries but may miss data that's only in `dbp:`.
+1. **Revert to hard dbo: preference** (like v1/v3) but with smarter fallback. The data shows that simple "prefer dbo:" outperforms any data-driven signal. Show triple counts in the prompt as context but DON'T tell the model to use them for namespace selection.
 
-2. **Data fidelity** — translate the question to discover as much data as possible. Use `dbp:` properties (broader coverage), drop type constraints. Produces messier queries but finds more results.
+2. **Two-pass namespace fallback**: generate with `dbo:` first. If the self-correction loop gets 0 results, the revision prompt already knows to try `dbp:`. This leverages the existing infrastructure without changing the default preference.
 
-The benchmark itself is inconsistent — some questions expect schema-faithful translations (using `dbo:`) while others expect data-faithful ones (using `dbp:`). **There's no single prompt that can guess which approach each question needs** without external knowledge of the actual data distribution.
+3. **Explicit dbo/dbp mapping in ontology results**: instead of showing both as separate results, group them: "dbo:director (113k triples) / dbp:director (156k triples) — use dbo: by default". This frames the choice clearly.
 
-## Potential next steps (priority order)
+### Medium impact: improving the remaining 33% "both FAIL"
 
-### High impact: property-level intelligence
+4. **Entity linking improvements**: the 29 "both FAIL" cases often involve wrong entity URIs (multi-word entities, disambiguation). Fuzzy matching or Unicode normalisation (en dash vs hyphen) in the Redis lookup could help.
 
-1. **Frequency-weighted ontology lookup**: weight results by triple count in the actual dataset. If `dbo:director` has 50k triples and `dbp:director` has 500, the score should reflect that. This gives the LLM a data-informed signal rather than just embedding similarity.
+5. **Structural pattern library**: the 4 "BGP OK, ops wrong" cases are low-hanging fruit. Add explicit rules for remaining patterns (GROUP BY, HAVING, subqueries).
 
-2. **Property mapping table**: precompute a `dbo:X ↔ dbp:X` equivalence map from the dataset. Annotate each ontology result with "also available as dbo/dbp with N triples". This makes the namespace choice explicit and data-driven.
+### What NOT to do
 
-3. **Two-pass namespace fallback**: use the self-correction loop to try `dbo:` first, then swap to `dbp:` if 0 results. This is already partially implemented but could be made more systematic.
+6. **Don't add more data-driven signals to namespace selection** — v2 and v4 both proved this makes things worse. The benchmark's namespace preference is a schema convention, not a data pattern.
 
-### Medium impact: structural improvements
-
-4. **Few-shot examples from the benchmark**: include 5 diverse examples (currently 3) covering more patterns: FILTER, ORDER BY + LIMIT, COUNT, multi-hop, etc. Each example should show the "why" of the namespace choice.
-
-5. **Structural rules enforcement**: add explicit rules for ORDER BY, LIMIT, GROUP BY patterns. The 6 "BGP OK but ops wrong" failures suggest the model sometimes gets the triples right but structures the query wrong.
-
-### Lower impact: evaluation infrastructure
-
-6. **Per-question regression tracking**: automatically diff v(N) vs v(N-1) and flag regressions in the History tab.
-
-7. **Namespace accuracy metric**: track "% of queries using the correct namespace" as a dedicated axis, separate from predicate correctness.
-
-8. **Cross-version A/B**: run two prompt versions on the same questions in a single eval for controlled comparison.
+7. **Don't over-engineer the prompt** — diminishing returns. v1 (20%) and v3 (18%) had the simplest prompts. Complexity in v2 (6%) and v4 (12%) caused regressions. Keep it simple.

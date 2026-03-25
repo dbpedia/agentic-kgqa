@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ontology term lookup using precomputed embeddings and gensim KeyedVectors."""
 
+import json
 import os
 import numpy as np
 from gensim.models import KeyedVectors
@@ -13,6 +14,7 @@ dotenv.load_dotenv(override=True)
 _client = None
 _model = None
 _ontology_terms = None
+_predicate_freqs = None
 
 
 def _get_client():
@@ -44,6 +46,19 @@ def _get_ontology_terms():
             uri_type, uri = key.split("|", 1)
             _ontology_terms[uri] = {"uri": uri, "type": uri_type, "key": key}
     return _ontology_terms
+
+
+def _get_predicate_freqs():
+    """Load predicate frequency table (lazy, cached)."""
+    global _predicate_freqs
+    if _predicate_freqs is None:
+        freq_path = os.path.join(os.path.dirname(__file__), "..", "data", "predicate_frequencies.json")
+        if os.path.exists(freq_path):
+            with open(freq_path) as f:
+                _predicate_freqs = json.load(f)
+        else:
+            _predicate_freqs = {}
+    return _predicate_freqs
 
 
 def _embed_texts(texts):
@@ -97,7 +112,14 @@ def lookup_term(term, classes=True, properties=True, k=5):
 
     # Sort by score descending for clean presentation
     results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:k]
+    results = results[:k]
+
+    # Annotate with triple counts from the frequency table
+    freqs = _get_predicate_freqs()
+    for r in results:
+        r["triples"] = freqs.get(r["uri"], 0)
+
+    return results
 
 
 def lookup_classes(term, k=5):
