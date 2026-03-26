@@ -23,12 +23,13 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 
 ### KGQA Agent (`src/agent.py`)
 - 5-step pipeline: analyse question (LLM) -> entity linking (Redis) -> ontology lookup (embeddings) -> SPARQL generation (LLM) -> verify & revise
-- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v4**.
+- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v5**.
   - v1: baseline — "prefer ontology properties over dbp:"
   - v2: explicit namespace guidance (dbo vs dbp), instructs LLM to pick properties from ontology lookup results by score rather than defaulting to dbo:. **Regressed to 6%** — over-corrected toward dbp: and lost DISTINCT.
   - v3: restores dbo: preference (use dbo when both exist), enforces SELECT DISTINCT, adds 3 diverse few-shot examples (dbo SELECT, dbp multi-hop, ASK).
-  - v4: **frequency-weighted ontology lookup** — each property result now includes triple counts from the actual dataset. Prompt instructs LLM: "pick the property with more triples; never use 0-triple properties". 5 few-shot examples (added COUNT and ORDER BY+LIMIT patterns). See `docs/analysis.md` for full regression analysis.
-- **Self-correcting queries**: after generating SPARQL, the agent executes it against the local DBpedia 2015-10 endpoint (`http://localhost:7878/query`). If the result is empty (0 results or COUNT=0) or errors, the agent asks the LLM to revise the query (up to 2 retries). Revision prefers **simplification** (dropping type constraints, swapping a single property) over adding UNIONs — the goal is to stay as close to the original translation as possible.
+  - v4: frequency-weighted ontology lookup — triple counts in results. **Regressed to 12%** — triple counts are anti-correlated with benchmark namespace preference.
+  - v5: **hard dbo: preference + grouped dbo/dbp pairs**. Key insight from v2+v4: data-driven signals hurt namespace selection. Reverts to hard "always use dbo:" rule but keeps triple counts as informational context. Ontology results now show dbo/dbp pairs grouped together (e.g. "dbo:director / dbp:director — use dbo:"). Revision prompt explicitly prioritises dbo→dbp swap as fallback strategy. 5 few-shot examples retained from v4. See `docs/analysis.md` for full evolution analysis.
+- **Self-correcting queries**: after generating SPARQL, the agent executes it against the local DBpedia 2015-10 endpoint (`http://localhost:7878/query`). If the result is empty (0 results or COUNT=0) or errors, the agent asks the LLM to revise the query (up to 2 retries). Revision prefers **simplification** (removing type constraints, then swapping dbo→dbp, then synonym properties) over adding UNIONs.
 - Streaming mode via `answer_stream()` that yields step-by-step events including revision steps
 - Full-URI output (no PREFIX shorthand) to avoid illegal SPARQL with special characters
 - Heuristic fallback when Redis is unavailable

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DBPEDIA_SPARQL_ENDPOINT = "http://localhost:7878/query"
 
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 
 SYSTEM_PROMPT = """\
 You are a SPARQL query generation agent for DBpedia (2015-10 snapshot).
@@ -53,17 +53,16 @@ Rules:
 - ALWAYS use full URIs in angle brackets. NEVER use PREFIX declarations or prefixed names.
   CORRECT: <http://dbpedia.org/resource/Keanu_Reeves>
   WRONG:   dbr:Keanu_Reeves
-  This is critical because resource names often contain special characters (parentheses, commas, etc.)
-  that are illegal in prefixed form.
 - Common URI bases:
   Resources: <http://dbpedia.org/resource/...>
-  Ontology:  <http://dbpedia.org/ontology/...> (dbo — curated, preferred when data exists)
-  Property:  <http://dbpedia.org/property/...> (dbp — raw infobox data)
+  Ontology:  <http://dbpedia.org/ontology/...> (dbo — curated ontology, ALWAYS preferred)
+  Property:  <http://dbpedia.org/property/...> (dbp — raw infobox, use ONLY when no dbo: equivalent exists)
   RDF type:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
-- PROPERTY SELECTION: The ontology lookup results include TRIPLE COUNTS from the actual dataset.
-  A property with 0 triples means NO data exists under that URI — NEVER use it.
-  When choosing between dbo: and dbp: for the same concept, pick the one with MORE triples.
-  If both have data, prefer dbo: unless dbp: has significantly more triples (10x+).
+- PROPERTY SELECTION:
+  The ontology lookup results show dbo/dbp pairs with triple counts.
+  ALWAYS use the dbo: (ontology) variant when one exists, regardless of triple counts.
+  Use dbp: ONLY when the results show no dbo: equivalent for that concept.
+  Triple counts are shown for reference — do NOT use them to choose between dbo: and dbp:.
   Do NOT invent property names — use URIs from the ontology lookup results provided to you.
 - ALWAYS use SELECT DISTINCT for queries that return resource URIs or literal values.
 - For boolean questions, use ASK WHERE { ... }.
@@ -71,14 +70,14 @@ Rules:
 - For "top N" questions, use ORDER BY DESC(...) LIMIT N.
 - Output ONLY the SPARQL query, no explanations.
 
-Example 1 — "What is the birthplace of Keanu Reeves?" (dbo: has more triples):
+Example 1 — "What is the birthplace of Keanu Reeves?":
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   <http://dbpedia.org/resource/Keanu_Reeves> <http://dbpedia.org/ontology/birthPlace> ?uri .
 }
 ```
 
-Example 2 — "Who are the managers of LeBron James's teams?" (dbp: is the only property with data):
+Example 2 — "Who are the managers of LeBron James's teams?" (no dbo: equivalent for these properties):
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   <http://dbpedia.org/resource/LeBron_James> <http://dbpedia.org/property/team> ?team .
@@ -86,14 +85,14 @@ SELECT DISTINCT ?uri WHERE {
 }
 ```
 
-Example 3 — "Is the Eiffel Tower in Paris?" (ASK query):
+Example 3 — "Is the Eiffel Tower in Paris?":
 ```sparql
 ASK WHERE {
   <http://dbpedia.org/resource/Eiffel_Tower> <http://dbpedia.org/ontology/location> <http://dbpedia.org/resource/Paris> .
 }
 ```
 
-Example 4 — "How many unique authors have written science fiction novels?" (COUNT):
+Example 4 — "How many unique authors have written science fiction novels?":
 ```sparql
 SELECT DISTINCT COUNT(?author) WHERE {
   ?x <http://dbpedia.org/ontology/literaryGenre> <http://dbpedia.org/resource/Science_fiction> .
@@ -101,7 +100,7 @@ SELECT DISTINCT COUNT(?author) WHERE {
 }
 ```
 
-Example 5 — "What are the 10 most populated countries?" (ORDER BY + LIMIT):
+Example 5 — "What are the 10 most populated countries?":
 ```sparql
 SELECT ?country WHERE {
   ?country <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Country> .
@@ -229,8 +228,9 @@ IMPORTANT: prefer SIMPLIFYING the query over adding UNION branches. The revised 
 stay as close as possible to the original translation. Apply fixes in this order of preference:
 
 1. Remove rdf:type constraints (the most common cause of 0 results — entities are often not typed as expected)
-2. Swap a single property for an alternative (e.g. dbo:author -> dbo:writer, or dbo: -> dbp:)
-3. Only as a last resort, add a UNION — and keep it minimal
+2. Swap dbo: properties to their dbp: equivalents (e.g. <.../ontology/director> -> <.../property/director>)
+3. Try a synonym property from the ontology lookup (e.g. dbo:author -> dbo:writer)
+4. Only as a last resort, add a UNION — and keep it minimal
 
 ALWAYS use full URIs in angle brackets. NEVER use PREFIX declarations.
 
@@ -344,14 +344,50 @@ class KGQAAgent:
         return out
 
     def _format_ontology_context(self, ontology_terms):
-        """Format ontology lookup results for LLM prompts."""
+        """Format ontology lookup results for LLM prompts.
+
+        Groups dbo/dbp pairs together so the LLM sees them as alternatives.
+        """
         out = ""
         for concept, results in ontology_terms.items():
             out += f"Concept \"{concept}\":\n"
+            # Group by property name (last path segment)
+            seen_names = {}
+            ungrouped = []
             for r in results:
+                uri = r["uri"]
+                name = uri.rsplit("/", 1)[-1]
+                is_dbo = "dbpedia.org/ontology/" in uri
+                is_dbp = "dbpedia.org/property/" in uri
+                if is_dbo or is_dbp:
+                    ns = "dbo" if is_dbo else "dbp"
+                    key = name.lower()
+                    if key not in seen_names:
+                        seen_names[key] = {}
+                    seen_names[key][ns] = r
+                else:
+                    ungrouped.append(r)
+
+            # Output grouped pairs first
+            for name, variants in seen_names.items():
+                dbo = variants.get("dbo")
+                dbp = variants.get("dbp")
+                if dbo and dbp:
+                    dbo_t = f"{dbo.get('triples', 0):,}"
+                    dbp_t = f"{dbp.get('triples', 0):,}"
+                    out += f"  - dbo: {dbo['uri']} ({dbo_t} triples) / dbp: {dbp['uri']} ({dbp_t} triples) — use dbo:\n"
+                elif dbo:
+                    t = f"{dbo.get('triples', 0):,}"
+                    out += f"  - {dbo['uri']} ({dbo['type']}, {t} triples)\n"
+                elif dbp:
+                    t = f"{dbp.get('triples', 0):,}"
+                    out += f"  - {dbp['uri']} ({dbp['type']}, {t} triples) — no dbo: equivalent, use this\n"
+
+            # Output ungrouped (classes etc.)
+            for r in ungrouped:
                 triples = r.get('triples', 0)
                 t_str = f"{triples:,} triples" if triples else "0 triples"
-                out += f"  - {r['uri']} ({r['type']}, score: {r['score']}, {t_str})\n"
+                out += f"  - {r['uri']} ({r['type']}, {t_str})\n"
         return out
 
     def _generate_sparql(self, question, linked_entities, ontology_terms, analysis, model=None):

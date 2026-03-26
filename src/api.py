@@ -282,11 +282,6 @@ HTML_PAGE = """\
   <h1>Agentic KGQA</h1>
   <p class="subtitle">Natural language to SPARQL against DBpedia 2015-10</p>
 
-  <div class="model-row">
-    <label for="model">Model:</label>
-    <select id="model"></select>
-  </div>
-
   <div class="tabs">
     <button class="tab active" onclick="switchTab('ask')">Ask</button>
     <button class="tab" onclick="switchTab('eval')">Evaluate</button>
@@ -305,6 +300,11 @@ HTML_PAGE = """\
         <span class="chip" onclick="askExample(this)">Who designed the Python programming language?</span>
       </div>
     </details>
+
+    <div class="model-row">
+      <label for="model">Model:</label>
+      <select id="model"></select>
+    </div>
 
     <div class="input-row">
       <input type="text" id="q" placeholder="Ask a question about DBpedia..." autofocus
@@ -344,7 +344,7 @@ HTML_PAGE = """\
 
   <!-- History tab -->
   <div id="tab-history" class="tab-content">
-    <p style="color:var(--muted);font-size:.85rem;margin-bottom:1rem">Performance across prompt versions. Each point is a full-benchmark eval (n=100).</p>
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:1rem">DeepSeek V3.2 performance across prompt versions (full benchmark, n=100).</p>
     <canvas id="history-chart" style="width:100%;max-width:760px;height:380px;margin-bottom:1.5rem"></canvas>
     <div id="history-table-wrap"></div>
   </div>
@@ -890,25 +890,48 @@ const HISTORY_LABELS = {
 };
 
 function loadHistory() {
+  const DS_MATCH = 'deepseek';
   fetch('/eval-results').then(r => r.json()).then(runs => {
-    // Filter to single-model full benchmarks (n>=50) with a prompt_version, pick best per version+model
-    const eligible = runs.filter(r => r.mode === 'single' && r.n >= 50 && r.prompt_version);
+    // Include both single-model DeepSeek runs AND all-models runs (n>=50) with a version
+    const eligible = runs.filter(r => r.n >= 50 && r.prompt_version && (
+      (r.mode === 'single' && r.model && r.model.toLowerCase().includes(DS_MATCH)) ||
+      r.mode === 'all'
+    ));
     if (eligible.length === 0) {
-      document.getElementById('history-table-wrap').innerHTML = '<p style="color:var(--muted);font-size:.85rem">No full benchmark runs with version tracking found yet. Run a full benchmark from the Evaluate tab first.</p>';
+      document.getElementById('history-table-wrap').innerHTML = '<p style="color:var(--muted);font-size:.85rem">No DeepSeek benchmark runs found yet.</p>';
       return;
     }
-    // Load full data for each
+    // Load full data
     Promise.all(eligible.map(r => fetch('/eval-results/' + encodeURIComponent(r.id)).then(x => x.json())))
       .then(fullRuns => {
-        // Group by prompt_version, pick latest per version+model
-        const byKey = {};
+        // Extract DeepSeek data from all runs
+        const byVersion = {};
         for (const run of fullRuns) {
-          const key = `${run.prompt_version}__${run.model}`;
-          if (!byKey[key] || run.timestamp > byKey[key].timestamp) {
-            byKey[key] = run;
+          const pv = run.prompt_version;
+          if (run.mode === 'single' && run.model && run.model.toLowerCase().includes(DS_MATCH)) {
+            // Direct single-model DeepSeek run
+            if (!byVersion[pv] || run.timestamp > byVersion[pv].timestamp) {
+              byVersion[pv] = run;
+            }
+          } else if (run.mode === 'all' && run.models) {
+            // Extract DeepSeek from all-models run
+            const dsModel = run.models.find(m => m.model_id && m.model_id.toLowerCase().includes(DS_MATCH));
+            if (dsModel) {
+              const synthetic = {
+                prompt_version: pv,
+                model: dsModel.model_id,
+                timestamp: run.timestamp,
+                summary: dsModel.summary,
+              };
+              if (!byVersion[pv] || run.timestamp > byVersion[pv].timestamp) {
+                byVersion[pv] = synthetic;
+              }
+            }
           }
         }
-        const points = Object.values(byKey).sort((a, b) => (a.prompt_version || '').localeCompare(b.prompt_version || '') || (a.timestamp || '').localeCompare(b.timestamp || ''));
+        const points = Object.values(byVersion).sort((a, b) =>
+          (a.prompt_version || '').localeCompare(b.prompt_version || '')
+        );
         drawHistoryChart(points);
         drawHistoryTable(points);
       });
@@ -932,7 +955,7 @@ function drawHistoryChart(points) {
   const chartW = chartRight - chartLeft, chartH = chartBot - chartTop;
 
   // X axis: one position per point (version + model)
-  const xLabels = points.map(p => `${p.prompt_version} (${(p.model || '').split('/').pop()})`);
+  const xLabels = points.map(p => p.prompt_version || '?');
   const xStep = chartW / Math.max(points.length - 1, 1);
 
   // Grid
