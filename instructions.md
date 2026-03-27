@@ -23,12 +23,13 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 
 ### KGQA Agent (`src/agent.py`)
 - 5-step pipeline: analyse question (LLM) -> entity linking (Redis) -> ontology lookup (embeddings) -> SPARQL generation (LLM) -> verify & revise
-- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v5**.
+- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v6**.
   - v1: baseline — "prefer ontology properties over dbp:"
-  - v2: explicit namespace guidance (dbo vs dbp), instructs LLM to pick properties from ontology lookup results by score rather than defaulting to dbo:. **Regressed to 6%** — over-corrected toward dbp: and lost DISTINCT.
-  - v3: restores dbo: preference (use dbo when both exist), enforces SELECT DISTINCT, adds 3 diverse few-shot examples (dbo SELECT, dbp multi-hop, ASK).
-  - v4: frequency-weighted ontology lookup — triple counts in results. **Regressed to 12%** — triple counts are anti-correlated with benchmark namespace preference.
-  - v5: **hard dbo: preference + grouped dbo/dbp pairs**. Key insight from v2+v4: data-driven signals hurt namespace selection. Reverts to hard "always use dbo:" rule but keeps triple counts as informational context. Ontology results now show dbo/dbp pairs grouped together (e.g. "dbo:director / dbp:director — use dbo:"). Revision prompt explicitly prioritises dbo→dbp swap as fallback strategy. 5 few-shot examples retained from v4. See `docs/analysis.md` for full evolution analysis.
+  - v2: explicit namespace guidance. **Regressed to 6%** — over-corrected toward dbp:.
+  - v3: restored dbo: preference + DISTINCT rule. Recovery to 18%.
+  - v4: frequency-weighted ontology lookup. **Regressed to 12%** — triple counts anti-correlated with benchmark.
+  - v5: hard dbo: preference + grouped dbo/dbp pairs. Recovery to 18%, best predicates (28%).
+  - v6: **entity linking Unicode fallback + type constraints + COUNT normalisation**. Three targeted fixes from persistent failure analysis: (1) Unicode char variant fallback in Redis lookup (en dash ↔ hyphen, smart quotes), (2) explicit rule to add rdf:type constraints when ontology returns a Class, (3) COUNT format aligned with benchmark (`SELECT DISTINCT COUNT(?var)` not `COUNT(DISTINCT ?var) AS ?count`). See `docs/analysis.md`.
 - **Self-correcting queries**: after generating SPARQL, the agent executes it against the local DBpedia 2015-10 endpoint (`http://localhost:7878/query`). If the result is empty (0 results or COUNT=0) or errors, the agent asks the LLM to revise the query (up to 2 retries). Revision prefers **simplification** (removing type constraints, then swapping dbo→dbp, then synonym properties) over adding UNIONs.
 - Streaming mode via `answer_stream()` that yields step-by-step events including revision steps
 - Full-URI output (no PREFIX shorthand) to avoid illegal SPARQL with special characters
@@ -70,4 +71,5 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 
 ### Entity Linking (`src/entity_linking.py`)
 - Redis-backed surface form lookup with redirect resolution (from NEF)
+- **Unicode normalisation fallback**: automatically tries character variants (en dash ↔ hyphen, smart quotes ↔ ASCII) when exact lookup fails. Fixes entities like "Republic of Montenegro (1992-2006)" → "Republic_of_Montenegro_(1992–2006)"
 - Default port fallback (6379)

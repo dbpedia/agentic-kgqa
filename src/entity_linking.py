@@ -48,8 +48,34 @@ class RedisEntityLinking:
         
         return df_all.sort_values(by='score', ascending=False).reset_index(drop=True)
     
+    # Unicode normalisation pairs for fallback lookups
+    _CHAR_VARIANTS = [
+        ('-', '\u2013'),  # hyphen ↔ en dash
+        ('-', '\u2014'),  # hyphen ↔ em dash
+        ("'", '\u2019'),  # apostrophe ↔ right single quote
+    ]
+
+    def _query_with_fallbacks(self, term):
+        """Query with Unicode character variant fallbacks."""
+        df = self.query(term)
+        if len(df) > 0:
+            return df
+        # Try character variants
+        for ascii_char, unicode_char in self._CHAR_VARIANTS:
+            if ascii_char in term:
+                variant = term.replace(ascii_char, unicode_char)
+                df = self.query(variant)
+                if len(df) > 0:
+                    return df
+            if unicode_char in term:
+                variant = term.replace(unicode_char, ascii_char)
+                df = self.query(variant)
+                if len(df) > 0:
+                    return df
+        return df
+
     def lookup(self, term, top_k=5, thr=0.01):
-        df_temp = self.query(term)
+        df_temp = self._query_with_fallbacks(term)
         if len(df_temp) == 0:
             return pd.DataFrame(columns=['entity', 'support', 'score'])
         
