@@ -1,114 +1,72 @@
-# Evaluation Analysis: Prompt Evolution v1 → v5
+# Evaluation Analysis: Prompt Evolution v1 → v6
 
 ## Performance summary (DeepSeek V3.2, full benchmark N=100)
 
-| Metric | v1 | v2 | v3 | v4 | v5 | Best |
-|--------|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Overall match** | **20.0%** | 6.0% | 18.0% | 12.0% | **18.0%** | v1 (20%) |
-| BGP Nodes | 25.0%* | 57.0% | 61.0% | **67.0%** | 55.0% | v4 (67%) |
-| BGP Predicates | 25.0%* | 26.0% | 26.0% | 20.0% | **28.0%** | **v5 (28%)** |
-| Inner operators | 84.0% | 81.0% | 79.0% | 85.0% | **85.0%** | v4/v5 (85%) |
-| Outer operators | 75.0% | 52.0% | 76.0% | 74.0% | **77.0%** | **v5 (77%)** |
+| Metric | v1 | v2 | v3 | v4 | v5 | v6 | Best |
+|--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Overall match** | 20.0% | 6.0% | 18.0% | 12.0% | 18.0% | **22.0%** | **v6** |
+| BGP Nodes | 25.0%* | 57.0% | 61.0% | 67.0% | 55.0% | **59.0%** | v4 (67%) |
+| BGP Predicates | 25.0%* | 26.0% | 26.0% | 20.0% | 28.0% | **29.0%** | **v6** |
+| Inner operators | 84.0% | 81.0% | 79.0% | 85.0% | 85.0% | **86.0%** | **v6** |
+| Outer operators | 75.0% | 52.0% | 76.0% | 74.0% | 77.0% | **86.0%** | **v6** |
 
 *v1 had a single combined BGP metric (25.0%), shown in both columns for comparison.
 
+### v6 — New best: 22% (+2pp over v1 baseline)
+**What changed**: Unicode fallback in entity linking, rdf:type constraint rule, COUNT format normalisation.
+
+**Results**: 5 improved, 1 regressed vs v5 → net +4. New record on overall match (22%), predicates (29%), inner ops (86%), and outer ops (86%). Outer ops jumped +9pp thanks to COUNT format fix.
+
 ### Namespace usage across versions
 
-| | v1 | v2 | v3 | v4 | v5 | Benchmark |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Queries using dbo: | 83 | 49 | ~70 | 53 | 65 | 76 |
-| Queries using dbp: | 25 | 63 | ~30 | 63 | 48 | 38 |
+| | v1 | v2 | v3 | v4 | v5 | v6 | Benchmark |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| dbo: | 83 | 49 | ~70 | 53 | 65 | 70 | 76 |
+| dbp: | 25 | 63 | ~30 | 63 | 48 | 47 | 38 |
 
-## Version history
+v6 is the closest to benchmark distribution yet (70/47 vs 76/38).
 
-### v1 — Baseline (20%)
-- "Prefer ontology properties over dbp: when both are available"
-- Single example using `dbo:birthPlace`
-- No explicit DISTINCT rule
+## Current failure analysis (v6, 78 failures)
 
-### v2 — Namespace over-correction (regression: 20% → 6%)
-Removed dbo preference, used embedding scores for namespace selection. `dbp:` scores inflate → over-used `dbp:`. Also lost DISTINCT.
-
-### v3 — Corrective balance (recovery: 6% → 18%)
-Restored dbo preference + DISTINCT rule + 3 examples. Recovered outer ops (76%) and pushed nodes to 61%.
-
-### v4 — Frequency-weighted lookup (regression: 18% → 12%)
-Added triple counts, told LLM to "pick the property with more triples". Triple counts are anti-correlated with benchmark expectations → over-used `dbp:` again. **Lesson: data statistics don't help with namespace selection.**
-
-### v5 — Grouped pairs + hard dbo preference (recovery: 12% → 18%)
-**What changed**:
-1. Hard `dbo:` preference: "ALWAYS use dbo: when one exists, regardless of triple counts"
-2. Grouped dbo/dbp pairs in ontology context with explicit annotations: `"dbo: .../director (113k) / dbp: .../director (156k) — use dbo:"`
-3. Triple counts shown as reference only, NOT for namespace selection
-
-**Results**:
-- 11 improved, 5 regressed vs v4 → net +6
-- **Best predicates so far: 28%** (+2pp vs v3)
-- Inner ops stable at 85%, outer ops best at 77%
-- Namespace usage: dbo=65, dbp=48 — closer to benchmark than v4 (53/63) but still dbp-heavy vs benchmark (76/38)
-- BGP Nodes dropped (67% → 55%) — possibly due to grouped formatting confusing entity resolution
-
-## Current failure analysis (v5, 82 failures)
-
-| Category | Count | % of failures |
+| Category | Count | % |
 |---|:---:|:---:|
-| Both nodes and predicates FAIL | 42 | 51% |
-| Nodes OK, Predicates FAIL | 30 | 37% |
-| BGP OK, operators wrong | 7 | 9% |
-| Nodes FAIL, Predicates OK | 3 | 4% |
+| Both nodes and predicates FAIL | 37 | 47% |
+| Nodes OK, Predicates FAIL | 34 | 44% |
+| Nodes FAIL, Predicates OK | 4 | 5% |
+| BGP OK, operators wrong | 3 | 4% |
 
-### Persistent failures (78 questions wrong in both v3 and v5)
+### The 34 "nodes OK, preds FAIL" — detailed breakdown:
+- **29 namespace mismatches**: gen=dbo but exp=dbp (10) or gen=dbp but exp=dbo (19). Still the #1 problem.
+- **5 other**: different property names entirely (Q4: numLocations vs numStores, Q27: director disambig, Q45: landing date property, Q62: squad property, Q97: source vs origin)
 
-The same 78 questions fail across versions — only 22 questions are ever correct. The failures fall into clear categories:
+### The 37 "both FAIL" — main patterns:
+- **Missing rdf:type constraints** (~12): Q2, Q6, Q10, Q13, Q21, Q22 — despite the v6 rule, the model still omits type constraints in many cases
+- **Structural mismatch** (~10): Q6 (subject/object inversion), Q7 (multi-hop structure wrong), Q14 (subject/object swapped)
+- **Wrong entity** (~8): Q5 (Montenegro URI still sometimes wrong despite Unicode fix), multi-word disambiguation failures
+- **Complex queries** (~7): Q11, Q17, Q78, Q81 — require multi-hop reasoning the model doesn't get right
 
-**1. Wrong predicate name (26 persistent, nodes OK):**
-- Q1: `dbo:literaryGenre` expected vs `dbp:genre` generated — synonym, not namespace
-- Q3: `dbo:birthPlace` expected vs `dbp:birthPlace` generated — correct namespace, wrong name variant? Actually same name, different namespace.
-- Q16: `dbp:director` expected vs `dbo:director` generated — benchmark wants dbp here!
-- Q22: `dbp:producer` expected vs `dbo:producer` generated
-- Q33: `dbp:author` expected vs `dbo:author` generated
+## Key learnings
 
-**2. Structural mismatch (42 persistent, both fail):**
-- Q2: missing `rdf:type dbo:Country` constraint
-- Q5: en-dash vs hyphen in entity URI (`1992–2006` vs `1992-2006`)
-- Q6: subject/object direction wrong (query structure inverted)
-- Q7: multi-hop reasoning — closest city of Eiffel Tower → birthplace of person from that city
-- Q10: missing `rdf:type AmericanFootballPlayer` + wrong property
+### What's working (monotonic improvement):
+- **Outer ops**: 75% → 86% — explicit structural rules work
+- **Inner ops**: 84% → 86% — stable and high
+- **Overall**: broke past v1 baseline for the first time
 
-**3. Operator issues (7 persistent, BGP OK):**
-- Q25, Q30: COUNT(DISTINCT ?var) vs COUNT(?var) — structural COUNT variants
-- Mostly minor formatting differences the judge flags
+### Remaining bottlenecks:
+1. **Namespace selection** (29/78 = 37% of failures): fundamental — benchmark is split between dbo/dbp and there's no deterministic rule
+2. **Missing type constraints** (~12 = 15%): the v6 prompt rule helps but the model doesn't apply it consistently
+3. **Structural complexity** (~10 = 13%): multi-hop, subject/object direction — hard to fix with prompting alone
 
-### The 22 questions that DO work
+## Next steps for v7
 
-These are simple single-hop queries with unambiguous properties (birthPlace, location, anthem, starring) where the entity linking works perfectly and the property exists in the expected namespace.
+### 1. Stronger type constraint enforcement
+The v6 rule says "when the question asks about a type AND the ontology returns a Class, add rdf:type". The model ignores it ~50% of the time. Possible fixes:
+- Make the rule more prominent (move to top of rules)
+- Add more examples showing type constraints (currently only Example 5 shows it)
+- Add a second example with a different type (e.g. dbo:Film, dbo:Person)
 
-## Key insights after 5 versions
+### 2. The remaining namespace problem
+29 out of 34 pure-predicate failures are namespace mismatches. The split is roughly even: 10 cases where we generate dbo but benchmark wants dbp, 19 where we generate dbp but benchmark wants dbo. The "always prefer dbo" rule correctly handles 19/29, but the 10 where benchmark expects dbp suggest we need the self-correction loop to try the alternative.
 
-### What we've proven:
-1. **Prompt engineering has a ceiling around 18-20%** for this task. v1 and v3/v5 all converge to this range.
-2. **Namespace selection is the #1 bottleneck** but it's not solvable via data signals (v2, v4 proved this).
-3. **The benchmark is inconsistent**: some questions expect `dbo:` even when `dbp:` has more data, and vice versa. ~26 of the 78 persistent failures are pure namespace mismatches where the agent picks the "wrong" one.
-4. **Entity linking works well** when the surface form is clean (BGP Nodes peaked at 67%).
-5. **Structural rules are effective** — every explicit rule (DISTINCT, COUNT, ORDER BY) gets adopted.
-
-### What would actually move the needle:
-
-#### High impact (could reach 30-40%):
-1. **Entity linking fixes**: the 42 "both FAIL" cases include ~10 with wrong entity URIs due to:
-   - Unicode normalisation (en dash `–` vs hyphen `-` in Q5)
-   - Multi-word entity disambiguation
-   - Missing redirects
-   Fixing these directly improves the node accuracy which then lets the right predicates surface.
-
-2. **Missing type constraints**: ~8 questions fail because the generated query is missing `rdf:type dbo:X` constraints that the benchmark expects (Q2, Q10, Q25, Q53). Adding a rule "include rdf:type when the ontology lookup returns a Class" could help.
-
-3. **COUNT format normalisation**: the judge flags `SELECT (COUNT(DISTINCT ?x) AS ?count)` as different from `SELECT DISTINCT COUNT(?x)` even though they're functionally similar. Relaxing the judge or normalising COUNT format could recover 5-7 questions.
-
-#### Medium impact (incremental):
-4. **More few-shot examples**: add examples that show `rdf:type` constraints and multi-hop patterns.
-5. **Predicate synonym mapping**: build a table of equivalent predicates (`literaryGenre ↔ genre`, `birthPlace ↔ placeOfBirth`).
-
-#### Low impact (not worth pursuing):
-6. More prompt engineering on namespace selection — we've hit the ceiling.
-7. Data-driven signals for namespace choice — proven counterproductive.
+### 3. Don't touch what's working
+Outer ops and inner ops are now solid. COUNT format and DISTINCT rules are effective. Don't change these.

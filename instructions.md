@@ -23,13 +23,14 @@ Create a Question Answering agent that answers questions against the DBpedia kno
 
 ### KGQA Agent (`src/agent.py`)
 - 5-step pipeline: analyse question (LLM) -> entity linking (Redis) -> ontology lookup (embeddings) -> SPARQL generation (LLM) -> verify & revise
-- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v6**.
+- **Versioned prompt system** (`PROMPT_VERSION`): prompt evolves based on eval failure analysis. Current version: **v7**.
   - v1: baseline — "prefer ontology properties over dbp:"
   - v2: explicit namespace guidance. **Regressed to 6%** — over-corrected toward dbp:.
   - v3: restored dbo: preference + DISTINCT rule. Recovery to 18%.
   - v4: frequency-weighted ontology lookup. **Regressed to 12%** — triple counts anti-correlated with benchmark.
   - v5: hard dbo: preference + grouped dbo/dbp pairs. Recovery to 18%, best predicates (28%).
-  - v6: **entity linking Unicode fallback + type constraints + COUNT normalisation**. Three targeted fixes from persistent failure analysis: (1) Unicode char variant fallback in Redis lookup (en dash ↔ hyphen, smart quotes), (2) explicit rule to add rdf:type constraints when ontology returns a Class, (3) COUNT format aligned with benchmark (`SELECT DISTINCT COUNT(?var)` not `COUNT(DISTINCT ?var) AS ?count`). See `docs/analysis.md`.
+  - v6: **entity linking Unicode fallback + type constraints + COUNT normalisation**. New best: **22%** overall, 86% outer ops. See `docs/analysis.md`.
+  - v7: **stronger type constraint enforcement** — rdf:type rule moved to #1 priority ("CRITICAL RULES"), two new examples showing Film and Company type constraints (7 total). Rules restructured as numbered priorities. Targets the 12 "missing rdf:type" failures.
 - **Self-correcting queries**: after generating SPARQL, the agent executes it against the local DBpedia 2015-10 endpoint (`http://localhost:7878/query`). If the result is empty (0 results or COUNT=0) or errors, the agent asks the LLM to revise the query (up to 2 retries). Revision prefers **simplification** (removing type constraints, then swapping dbo→dbp, then synonym properties) over adding UNIONs.
 - Streaming mode via `answer_stream()` that yields step-by-step events including revision steps
 - Full-URI output (no PREFIX shorthand) to avoid illegal SPARQL with special characters
