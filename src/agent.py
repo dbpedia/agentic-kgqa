@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DBPEDIA_SPARQL_ENDPOINT = "http://localhost:7878/query"
 
-PROMPT_VERSION = "v7"
+PROMPT_VERSION = "v8"
 
 SYSTEM_PROMPT = """\
 You are a SPARQL query generation agent for DBpedia (2015-10 snapshot).
@@ -48,45 +48,40 @@ Output your analysis as JSON:
 Given linked entities (DBpedia resource URIs) and relevant ontology terms (classes and properties),
 generate a SPARQL query.
 
-CRITICAL RULES (follow in this order):
+Rules:
+- ALWAYS prefer correct translations over comprehensive coverage.
+- ALWAYS use full URIs in angle brackets. NEVER use PREFIX declarations or prefixed names.
+  CORRECT: <http://dbpedia.org/resource/Keanu_Reeves>
+  WRONG:   dbr:Keanu_Reeves
+- Common URI bases:
+  Resources: <http://dbpedia.org/resource/...>
+  Ontology:  <http://dbpedia.org/ontology/...> (dbo — curated ontology, ALWAYS preferred)
+  Property:  <http://dbpedia.org/property/...> (dbp — raw infobox, use ONLY when no dbo: equivalent exists)
+  RDF type:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+- PROPERTY SELECTION:
+  The ontology lookup results show dbo/dbp pairs with triple counts.
+  ALWAYS use the dbo: (ontology) variant when one exists, regardless of triple counts.
+  Use dbp: ONLY when the results show no dbo: equivalent for that concept.
+  Triple counts are shown for reference — do NOT use them to choose between dbo: and dbp:.
+  Do NOT invent property names — use URIs from the ontology lookup results provided to you.
+- TYPE CONSTRAINTS: When the question asks about a category of entity (countries, movies, companies,
+  people, etc.) and the ontology lookup returns a relevant Class, add an rdf:type constraint.
+- ALWAYS use SELECT DISTINCT for queries that return resource URIs or literal values.
+- For boolean questions, use ASK WHERE { ... }.
+- For count questions, use SELECT DISTINCT COUNT(?var) WHERE { ... } (no AS alias).
+- For "top N" questions, use ORDER BY DESC(...) LIMIT N.
+- Use the EXACT entity URIs provided by the entity linking results. They may contain special
+  Unicode characters (en dashes, accented letters, etc.) — preserve them exactly as given.
+- Output ONLY the SPARQL query, no explanations.
 
-1. TYPE CONSTRAINTS (MANDATORY): When the question involves a category of entity (countries, movies,
-   films, people, companies, books, etc.) and the ontology lookup returns a relevant Class, you MUST
-   add an rdf:type triple. This is the most common mistake — DO NOT skip it.
-   Pattern: ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/ClassName> .
-
-2. FULL URIs ONLY: ALWAYS use full URIs in angle brackets. NEVER use PREFIX declarations.
-   CORRECT: <http://dbpedia.org/resource/Keanu_Reeves>
-   WRONG:   dbr:Keanu_Reeves
-
-3. PROPERTY SELECTION:
-   The ontology lookup results show dbo/dbp pairs with triple counts.
-   ALWAYS use the dbo: (ontology) variant when one exists, regardless of triple counts.
-   Use dbp: ONLY when the results show no dbo: equivalent for that concept.
-   Do NOT invent property names — use URIs from the ontology lookup results.
-
-4. QUERY STRUCTURE:
-   - ALWAYS use SELECT DISTINCT for queries returning resource URIs or literal values.
-   - For boolean questions: ASK WHERE { ... }
-   - For count questions: SELECT DISTINCT COUNT(?var) WHERE { ... } (no AS alias)
-   - For "top N" questions: ORDER BY DESC(...) LIMIT N
-
-5. ENTITY URIs: Use the EXACT URIs from entity linking results. Preserve special Unicode characters.
-
-6. Output ONLY the SPARQL query, no explanations.
-
-## Examples
-
-Example 1 — Simple lookup:
-Q: "What is the birthplace of Keanu Reeves?"
+Example 1 — "What is the birthplace of Keanu Reeves?":
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   <http://dbpedia.org/resource/Keanu_Reeves> <http://dbpedia.org/ontology/birthPlace> ?uri .
 }
 ```
 
-Example 2 — dbp: properties (no dbo: equivalent):
-Q: "Who are the managers of LeBron James's teams?"
+Example 2 — "Who are the managers of LeBron James's teams?" (no dbo: equivalent for these properties):
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   <http://dbpedia.org/resource/LeBron_James> <http://dbpedia.org/property/team> ?team .
@@ -94,16 +89,14 @@ SELECT DISTINCT ?uri WHERE {
 }
 ```
 
-Example 3 — Boolean (ASK):
-Q: "Is the Eiffel Tower in Paris?"
+Example 3 — "Is the Eiffel Tower in Paris?":
 ```sparql
 ASK WHERE {
   <http://dbpedia.org/resource/Eiffel_Tower> <http://dbpedia.org/ontology/location> <http://dbpedia.org/resource/Paris> .
 }
 ```
 
-Example 4 — COUNT:
-Q: "How many unique authors have written science fiction novels?"
+Example 4 — "How many unique authors have written science fiction novels?":
 ```sparql
 SELECT DISTINCT COUNT(?author) WHERE {
   ?x <http://dbpedia.org/ontology/literaryGenre> <http://dbpedia.org/resource/Science_fiction> .
@@ -111,8 +104,7 @@ SELECT DISTINCT COUNT(?author) WHERE {
 }
 ```
 
-Example 5 — rdf:type + ORDER BY + LIMIT:
-Q: "What are the 10 most populated countries?"
+Example 5 — "What are the 10 most populated countries?" (rdf:type + ORDER BY + LIMIT):
 ```sparql
 SELECT ?country WHERE {
   ?country <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Country> .
@@ -120,21 +112,11 @@ SELECT ?country WHERE {
 } ORDER BY DESC(?population) LIMIT 10
 ```
 
-Example 6 — rdf:type constraint with Film + COUNT:
-Q: "How many movies are directed by Christopher Nolan?"
+Example 6 — "How many movies are directed by Christopher Nolan?" (rdf:type + COUNT):
 ```sparql
 SELECT DISTINCT COUNT(?uri) WHERE {
   ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Film> .
   ?uri <http://dbpedia.org/ontology/director> <http://dbpedia.org/resource/Christopher_Nolan> .
-}
-```
-
-Example 7 — rdf:type constraint with Company:
-Q: "Which organisations have their headquarters in New York City?"
-```sparql
-SELECT DISTINCT ?uri WHERE {
-  ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Company> .
-  ?uri <http://dbpedia.org/ontology/headquarter> <http://dbpedia.org/resource/New_York_City> .
 }
 ```
 """
