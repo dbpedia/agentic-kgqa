@@ -7,6 +7,9 @@ import fastapi
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from src.agent import KGQAAgent, MODELS, DEFAULT_MODEL
+
+# Slug -> OpenRouter model ID mapping for path-based endpoints
+MODEL_SLUGS = {m["id"].split("/")[-1]: m["id"] for m in MODELS}
 from src.evaluate import evaluate_stream, evaluate_all_stream, list_results, load_result
 
 logging.basicConfig(level=logging.INFO)
@@ -16,6 +19,7 @@ app = fastapi.FastAPI(title="TEXT2SPARQL API - Agentic KGQA")
 
 KNOWN_DATASETS = [
     "https://text2sparql.aksw.org/2025/dbpedia/",
+    "https://text2sparql.aksw.org/2026/dbpedia/",
 ]
 
 agent = None
@@ -67,6 +71,34 @@ def _event_stream(question: str, model: str | None = None):
 async def stream_answer(question: str, model: str | None = None):
     return StreamingResponse(
         _event_stream(question, model=model),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# --- Model-in-URL endpoints ---
+
+
+def _resolve_model_slug(model_slug: str) -> str:
+    if model_slug not in MODEL_SLUGS:
+        raise fastapi.HTTPException(404, f"Unknown model '{model_slug}'. Available: {', '.join(sorted(MODEL_SLUGS))}")
+    return MODEL_SLUGS[model_slug]
+
+
+@app.get("/m/{model_slug}/answer")
+async def model_get_answer(model_slug: str, question: str, dataset: str):
+    model_id = _resolve_model_slug(model_slug)
+    if dataset not in KNOWN_DATASETS:
+        raise fastapi.HTTPException(404, "Unknown dataset")
+    sparql = agent.answer(question, model=model_id)
+    return {"dataset": dataset, "question": question, "query": sparql, "model": model_id}
+
+
+@app.get("/m/{model_slug}/stream")
+async def model_stream_answer(model_slug: str, question: str):
+    model_id = _resolve_model_slug(model_slug)
+    return StreamingResponse(
+        _event_stream(question, model=model_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

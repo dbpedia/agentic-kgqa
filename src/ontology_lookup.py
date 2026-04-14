@@ -61,13 +61,23 @@ def _get_predicate_freqs():
     return _predicate_freqs
 
 
-def _embed_texts(texts):
+def _embed_texts(texts, retries=2):
     client = _get_client()
-    response = client.embeddings.create(
-        input=[f"Term: {text}" for text in texts],
-        model="text-embedding-3-small",
-    )
-    return [x.embedding for x in response.data]
+    import time
+    for attempt in range(retries + 1):
+        try:
+            response = client.embeddings.create(
+                input=[f"Term: {text}" for text in texts],
+                model="text-embedding-3-small",
+            )
+            if not response.data:
+                raise ValueError("No embedding data received")
+            return [x.embedding for x in response.data]
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(1)
+                continue
+            raise
 
 
 def lookup_term(term, classes=True, properties=True, k=5):
