@@ -137,6 +137,10 @@ class CorporateKGQAAgent(KGQAAgent):
     def _link_entities(self, entities):
         linked = {}
         for entity in entities:
+            # LLM may return entity as a dict {"name": ..., "type": ...}
+            if isinstance(entity, dict):
+                entity = entity.get("name") or entity.get("label") or str(entity)
+            entity = str(entity)
             candidates = lookup_instance(entity, k=3)
             if candidates:
                 linked[entity] = candidates
