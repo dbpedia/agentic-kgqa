@@ -32,7 +32,9 @@ BATCH_SIZE = 500
 # ---------------------------------------------------------------------------
 
 def _expand_prefix(term, prefixes):
-    """Expand a prefixed name to a full URI."""
+    """Expand a prefixed name to a full URI. Handles 'a' shorthand for rdf:type."""
+    if term == "a":
+        return "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
     if term.startswith("<") and term.endswith(">"):
         return term[1:-1]
     if ":" in term:
@@ -89,23 +91,25 @@ def parse_vocab(path):
         if subject is None:
             continue
 
-        # Predicate-object pairs
-        parts = stripped.split(None, 2)
-        if len(parts) < 2:
+        # Predicate-object pairs — split on first whitespace only to preserve multi-word objects
+        tok = stripped.split(None, 1)
+        if len(tok) < 2:
             continue
-        pred_raw, obj_raw = parts[0], parts[1] if len(parts) >= 2 else ""
+        pred_raw = tok[0]
+        obj_rest = tok[1].strip()
         pred = _expand_prefix(pred_raw, prefixes)
         if pred is None:
             continue
 
         if pred == rdf_type_uri:
-            obj = _expand_prefix(obj_raw.rstrip(" ;."), prefixes)
+            obj_tok = obj_rest.split()[0].rstrip(" ;.")
+            obj = _expand_prefix(obj_tok, prefixes)
             if obj and obj in owl_type_map:
                 terms[subject]["owl_type"] = owl_type_map[obj]
 
         elif pred == "http://www.w3.org/2000/01/rdf-schema#label":
-            # Extract string from "Label"@en or "Label"
-            m = re.match(r'"([^"]+)"', obj_raw)
+            # Extract string from "Label text"@en or "Label text"
+            m = re.match(r'"([^"]+)"', obj_rest)
             if m:
                 terms[subject]["label"] = m.group(1)
 
@@ -168,23 +172,24 @@ def parse_instances(path):
         if subject is None:
             continue
 
-        parts = stripped.split(None, 2)
-        if len(parts) < 2:
+        tok = stripped.split(None, 1)
+        if len(tok) < 2:
             continue
-        pred_raw = parts[0]
-        obj_raw = parts[1] if len(parts) >= 2 else ""
+        pred_raw = tok[0]
+        obj_rest = tok[1].strip()
 
         pred = _expand_prefix(pred_raw, prefixes)
         if pred is None:
             continue
 
         if pred == rdf_type_uri:
-            obj = _expand_prefix(obj_raw.rstrip(" ;."), prefixes)
+            obj_tok = obj_rest.split()[0].rstrip(" ;.")
+            obj = _expand_prefix(obj_tok, prefixes)
             if obj and obj in pv_class_map:
                 instances[subject]["type"] = pv_class_map[obj]
 
         elif pred == "http://www.w3.org/2000/01/rdf-schema#label":
-            m = re.match(r'"([^"]+)"', obj_raw)
+            m = re.match(r'"([^"]+)"', obj_rest)
             if m:
                 instances[subject]["label"] = m.group(1)
 
