@@ -1,0 +1,106 @@
+# yamllint disable rule:line-length
+---
+dataset:
+  id: https://text2sparql.aksw.org/2026/corporate/
+  prefix: ck25
+  defaultNamespace: http://ld.company.org/prod-vocab/
+questions:
+
+  - id: 1
+    question:
+      en: How many hardware products are in the catalog?
+    query:
+      sparql: |
+        SELECT DISTINCT COUNT(?hw) WHERE {
+          ?hw <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ld.company.org/prod-vocab/Hardware> .
+        }
+
+  - id: 2
+    question:
+      en: List all departments.
+    query:
+      sparql: |
+        SELECT DISTINCT ?name WHERE {
+          ?dept <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ld.company.org/prod-vocab/Department> .
+          ?dept <http://www.w3.org/2000/01/rdf-schema#label> ?name .
+        }
+
+  - id: 3
+    question:
+      en: What is the email address of Elena Herzog?
+    query:
+      sparql: |
+        SELECT DISTINCT ?email WHERE {
+          <http://ld.company.org/prod-instances/empl-Elena.Herzog%40company.org> <http://ld.company.org/prod-vocab/email> ?email .
+        }
+
+  - id: 4
+    question:
+      en: Which employees are members of the Engineering department?
+    query:
+      sparql: |
+        SELECT DISTINCT ?name WHERE {
+          ?emp <http://ld.company.org/prod-vocab/memberOf> <http://ld.company.org/prod-instances/dept-73191> .
+          ?emp <http://www.w3.org/2000/01/rdf-schema#label> ?name .
+        }
+
+  - id: 5
+    question:
+      en: How many suppliers are located in China?
+    query:
+      sparql: |
+        SELECT DISTINCT COUNT(?s) WHERE {
+          ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ld.company.org/prod-vocab/Supplier> .
+          ?s <http://ld.company.org/prod-vocab/addressCountry> "China" .
+        }
+
+  - id: 6
+    question:
+      en: Who is the manager of Arendt Beitel?
+    query:
+      sparql: |
+        SELECT DISTINCT ?name WHERE {
+          <http://ld.company.org/prod-instances/empl-Arendt.Beitel%40company.org> <http://ld.company.org/prod-vocab/hasManager> ?mgr .
+          ?mgr <http://www.w3.org/2000/01/rdf-schema#label> ?name .
+        }
+
+  - id: 7
+    question:
+      en: What products does the Production department manage?
+    query:
+      sparql: |
+        SELECT DISTINCT ?name WHERE {
+          <http://ld.company.org/prod-instances/dept-66469> <http://ld.company.org/prod-vocab/responsibleFor> ?prod .
+          ?prod <http://www.w3.org/2000/01/rdf-schema#label> ?name .
+        }
+
+  - id: 8
+    question:
+      en: List all product categories.
+    query:
+      sparql: |
+        SELECT DISTINCT ?name WHERE {
+          ?cat <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ld.company.org/prod-vocab/ProductCategory> .
+          ?cat <http://www.w3.org/2000/01/rdf-schema#label> ?name .
+        }
+
+  - id: 9
+    question:
+      en: Which managers have direct reports in the Product Management department?
+    query:
+      sparql: |
+        SELECT DISTINCT ?mgrName WHERE {
+          ?mgr <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ld.company.org/prod-vocab/Manager> .
+          ?mgr <http://ld.company.org/prod-vocab/hasDirectReport> ?emp .
+          ?emp <http://ld.company.org/prod-vocab/memberOf> <http://ld.company.org/prod-instances/dept-22183> .
+          ?mgr <http://www.w3.org/2000/01/rdf-schema#label> ?mgrName .
+        }
+
+  - id: 10
+    question:
+      en: How many services are available?
+    query:
+      sparql: |
+        SELECT DISTINCT COUNT(?s) WHERE {
+          ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ld.company.org/prod-vocab/Service> .
+        }
