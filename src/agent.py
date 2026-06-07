@@ -330,7 +330,7 @@ class KGQAAgent:
         response = _chat(self.client, messages, model=model)
         return _extract_json(response)
 
-    def _link_entities(self, entities, question=None):
+    def _link_entities(self, entities, question=None, model=None):
         """Step 2: Link entity mentions to DBpedia resource URIs via Redis.
 
         When a question is provided, calls _disambiguate_entity to use LLM reasoning
@@ -353,7 +353,7 @@ class KGQAAgent:
                         uri = "http://dbpedia.org/resource/" + uri
                     entries.append({"uri": uri, "score": round(row["score"], 4), "source": "redis"})
                 if question and len(entries) > 1:
-                    entries = self._disambiguate_entity(question, entity, entries)
+                    entries = self._disambiguate_entity(question, entity, entries, model=model)
                 linked[entity] = entries
             else:
                 # Fallback
@@ -548,7 +548,7 @@ class KGQAAgent:
         concepts = analysis.get("concepts", [])
 
         # Step 2: Entity linking
-        linked_entities = self._link_entities(entities, question=question)
+        linked_entities = self._link_entities(entities, question=question, model=model)
         logger.info(f"Linked entities: {linked_entities}")
 
         # Step 3: Ontology lookup
@@ -582,7 +582,7 @@ class KGQAAgent:
 
         # Step 2: Entity linking
         yield ("step_start", {"step": "entity_linking", "label": "Linking entities via Redis..."})
-        linked_entities = self._link_entities(entities, question=question)
+        linked_entities = self._link_entities(entities, question=question, model=model)
         # Convert numpy floats for JSON serialisation
         linked_serialisable = {}
         for mention, candidates in linked_entities.items():
