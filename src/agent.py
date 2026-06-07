@@ -548,7 +548,7 @@ class KGQAAgent:
         concepts = analysis.get("concepts", [])
 
         # Step 2: Entity linking
-        linked_entities = self._link_entities(entities)
+        linked_entities = self._link_entities(entities, question=question)
         logger.info(f"Linked entities: {linked_entities}")
 
         # Step 3: Ontology lookup
@@ -582,7 +582,7 @@ class KGQAAgent:
 
         # Step 2: Entity linking
         yield ("step_start", {"step": "entity_linking", "label": "Linking entities via Redis..."})
-        linked_entities = self._link_entities(entities)
+        linked_entities = self._link_entities(entities, question=question)
         # Convert numpy floats for JSON serialisation
         linked_serialisable = {}
         for mention, candidates in linked_entities.items():
