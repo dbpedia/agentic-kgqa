@@ -147,6 +147,23 @@ MODELS = [
 
 MAX_OUTPUT_TOKENS = 2048  # SPARQL queries are short — cap output to avoid runaway generation
 
+DISAMBIGUATION_PROMPT = """\
+Given the question: "{question}"
+
+The entity mention "{mention}" has these DBpedia candidates:
+{candidates}
+
+Important context for disambiguation:
+- If the question asks about a director, writer, or author of a creative work -> prefer the book/novel entity not the film variant
+- If the question asks about a film specifically or mentions cast, actors, cinematographer -> prefer the _(film) variant
+- If the question asks about a state or region -> prefer the _(state) variant
+- If the question asks about a city -> prefer the city entity not a sports team or organization
+- If the question asks about a company -> prefer the company entity not a location
+- Weigh question context words heavily over Redis scores
+
+Pick the number of the most appropriate candidate.
+Reply with ONLY the number (1, 2, 3, etc.) and nothing else."""
+
 
 def _chat(client, messages, model=None):
     model = model or DEFAULT_MODEL
@@ -337,6 +354,42 @@ class KGQAAgent:
                 uri = "http://dbpedia.org/resource/" + entity.replace(" ", "_")
                 linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
         return linked
+
+    def _disambiguate_entity(self, question, mention, candidates, model=None):
+        """Use LLM to pick the most contextually appropriate entity from Redis candidates.
+
+        Falls back to the original candidate list if the LLM call fails or returns
+        an invalid response.
+        """
+        if not candidates or len(candidates) == 1:
+            return candidates
+
+        candidate_list = "\n".join(
+            f"{i + 1}. {c['uri']} (score: {c['score']})"
+            for i, c in enumerate(candidates)
+        )
+        prompt = DISAMBIGUATION_PROMPT.format(
+            question=question,
+            mention=mention,
+            candidates=candidate_list,
+        )
+        try:
+            response = self.client.chat.completions.create(
+                model=model or DEFAULT_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=10,
+            )
+            answer = response.choices[0].message.content
+            if answer is None:
+                return candidates
+            idx = int(answer.strip()) - 1
+            if 0 <= idx < len(candidates):
+                selected = candidates.pop(idx)
+                candidates.insert(0, selected)
+        except Exception:
+            pass
+        return candidates
 
     def _lookup_ontology(self, concepts):
         """Step 3: Look up relevant ontology terms for each concept."""
