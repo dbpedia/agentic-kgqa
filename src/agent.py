@@ -330,8 +330,12 @@ class KGQAAgent:
         response = _chat(self.client, messages, model=model)
         return _extract_json(response)
 
-    def _link_entities(self, entities):
-        """Step 2: Link entity mentions to DBpedia resource URIs via Redis."""
+    def _link_entities(self, entities, question=None):
+        """Step 2: Link entity mentions to DBpedia resource URIs via Redis.
+
+        When a question is provided, calls _disambiguate_entity to use LLM reasoning
+        to pick the most contextually appropriate candidate from the top-k results.
+        """
         linked = {}
         for entity in entities:
             if self.redis_el is None:
@@ -340,7 +344,7 @@ class KGQAAgent:
                 linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
                 continue
 
-            results = self.redis_el.lookup(entity, top_k=3, thr=0.01)
+            results = self.redis_el.lookup(entity, top_k=5, thr=0.01)
             if len(results) > 0:
                 entries = []
                 for idx, row in results.iterrows():
@@ -348,6 +352,8 @@ class KGQAAgent:
                     if not uri.startswith("http"):
                         uri = "http://dbpedia.org/resource/" + uri
                     entries.append({"uri": uri, "score": round(row["score"], 4), "source": "redis"})
+                if question and len(entries) > 1:
+                    entries = self._disambiguate_entity(question, entity, entries)
                 linked[entity] = entries
             else:
                 # Fallback
