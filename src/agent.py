@@ -14,6 +14,7 @@ import dotenv
 
 from src.entity_linking import RedisEntityLinking
 from src.ontology_lookup import lookup_term, lookup_classes, lookup_properties
+from src import schema_introspector
 
 dotenv.load_dotenv(override=True)
 
@@ -398,10 +399,15 @@ class KGQAAgent:
         return candidates
 
     def _lookup_ontology(self, concepts):
-        """Step 3: Look up relevant ontology terms for each concept."""
+        """Step 3: Look up relevant ontology terms for each concept.
+
+        Each concept is looked up in the Nomic index, then enriched with
+        rdfs:domain and rdfs:range from the OWL ontology via Schema Introspector.
+        """
         ontology = {}
         for concept in concepts:
             results = lookup_term(concept, k=5)
+            results = schema_introspector.enrich(results)
             ontology[concept] = results
         return ontology
 
