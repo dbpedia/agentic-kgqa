@@ -1,142 +1,124 @@
-#!/usr/bin/env python3
-"""Ontology term lookup using precomputed embeddings and gensim KeyedVectors."""
+#!/usr/bin/env python
+"""Ontology term lookup using Nomic Embed v1.5 and PyTorch cosine similarity.
+
+Replaces the previous OpenAI + Gensim word2vec approach with a fully local,
+zero-API-cost semantic search over the precomputed Nomic embedding index.
+
+The index is built once by running:
+    pipenv run python scripts/build_ontology_index.py
+
+Index files (these will be created by running the build script):
+    data/nomic_embeddings.pt   — PyTorch tensor [N, 768]
+    data/nomic_uris.json       — list of N URIs
+    data/nomic_labels.json     — list of N labels
+"""
 
 import json
-import os
-import numpy as np
-from gensim.models import KeyedVectors
-from openai import OpenAI
-import dotenv
+from pathlib import Path
 
-dotenv.load_dotenv(override=True)
+import torch
+from sentence_transformers import SentenceTransformer, util
 
-# Singleton instances
-_client = None
-_model = None
-_ontology_terms = None
-_predicate_freqs = None
+# ─── Index paths ──────────────────────────────────────────────────────────────
+
+_DATA_DIR = Path(__file__).parent.parent / "data"
+_EMBEDDINGS_PATH = _DATA_DIR / "nomic_embeddings.pt"
+_URIS_PATH       = _DATA_DIR / "nomic_uris.json"
+_LABELS_PATH     = _DATA_DIR / "nomic_labels.json"
+
+# ─── Singletons ───────────────────────────────────────────────────────────────
+
+_nomic_model = None
+_embeddings  = None
+_uris        = None
+_labels      = None
 
 
-def _get_client():
-    global _client
-    if _client is None:
-        _client = OpenAI(
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            base_url="https://openrouter.ai/api/v1",
+def _load_index():
+    """Lazy-load the Nomic index into memory (runs once per process)."""
+    global _nomic_model, _embeddings, _uris, _labels
+    if _embeddings is not None:
+        return
+
+    if not _EMBEDDINGS_PATH.exists():
+        raise FileNotFoundError(
+            f"Nomic index not found at {_EMBEDDINGS_PATH}.\n"
+            "Run: pipenv run python scripts/build_ontology_index.py"
         )
-    return _client
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    _nomic_model = SentenceTransformer(
+        "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True, device=device
+    )
+    _embeddings = torch.load(str(_EMBEDDINGS_PATH), map_location=device)
+    with open(_URIS_PATH) as f:
+        _uris = json.load(f)
+    with open(_LABELS_PATH) as f:
+        _labels = json.load(f)
 
 
-def _get_model():
-    global _model
-    if _model is None:
-        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-        vectors_path = os.path.join(data_dir, "ontology-vectors.w2v")
-        _model = KeyedVectors.load_word2vec_format(vectors_path)
-    return _model
+# ─── Semantic lookup ───────────────────────────────────────────────────────────────
 
-
-def _get_ontology_terms():
-    """Parse ontology terms from the w2v file keys."""
-    global _ontology_terms
-    if _ontology_terms is None:
-        model = _get_model()
-        _ontology_terms = {}
-        for key in model.key_to_index:
-            uri_type, uri = key.split("|", 1)
-            _ontology_terms[uri] = {"uri": uri, "type": uri_type, "key": key}
-    return _ontology_terms
-
-
-def _get_predicate_freqs():
-    """Load predicate frequency table (lazy, cached)."""
-    global _predicate_freqs
-    if _predicate_freqs is None:
-        freq_path = os.path.join(os.path.dirname(__file__), "..", "data", "predicate_frequencies.json")
-        if os.path.exists(freq_path):
-            with open(freq_path) as f:
-                _predicate_freqs = json.load(f)
-        else:
-            _predicate_freqs = {}
-    return _predicate_freqs
-
-
-def _embed_texts(texts, retries=2):
-    client = _get_client()
-    import time
-    for attempt in range(retries + 1):
-        try:
-            response = client.embeddings.create(
-                input=[f"Term: {text}" for text in texts],
-                model="text-embedding-3-small",
-            )
-            if not response.data:
-                raise ValueError("No embedding data received")
-            return [x.embedding for x in response.data]
-        except Exception as e:
-            if attempt < retries:
-                time.sleep(1)
-                continue
-            raise
-
-
-def lookup_term(term, classes=True, properties=True, k=5):
+def lookup_term(term, k=5, classes=True, properties=True):
     """Look up an ontology term by natural language description.
 
-    Returns a balanced list of dbo: and dbp: results (when both are available).
-    Each result is a dict with keys: uri, type, score, key.
+    Returns top-k semantically similar entries from the Nomic index.
+
+    Args:
+        term:       Natural language concept (e.g. "director", "birthplace")
+        k:          Number of results to return
+        classes:    Include OWL Classes in results (default True)
+        properties: Include OWL Properties in results (default True)
+
+    Returns:
+        List of dicts with keys: uri, label, score, confidence_pct, source
+        - uri:            Full DBpedia URI
+        - label:          Human-readable label
+        - score:          Raw cosine similarity in [-1, 1]
+        - confidence_pct: Normalised confidence ((cosine+1)/2)*100
+        - source:         Always "nomic"
     """
-    model = _get_model()
-    ontology_terms = _get_ontology_terms()
-    term_emb = _embed_texts([term])[0]
+    _load_index()
 
-    dbo_results = []  # Classes + dbo: properties
-    dbp_results = []  # dbp: properties
+    query_text = f"search_query: {term}"
+    query_embedding = _nomic_model.encode(query_text, convert_to_tensor=True)
+    cos_scores = util.cos_sim(query_embedding, _embeddings)
+    top_results = torch.topk(cos_scores, k=min(k * 3, len(_uris)))
 
-    for entry, score in model.most_similar(positive=[np.array(term_emb)], topn=200):
-        uri_type, uri = entry.split("|", 1)
-        if uri_type == "Class" and not classes:
-            continue
-        if "Property" in uri_type and not properties:
-            continue
-
-        item = {"uri": uri, "type": uri_type, "score": round(score, 4), "key": entry}
-
-        if "dbpedia.org/property/" in uri:
-            if len(dbp_results) < k:
-                dbp_results.append(item)
-        else:
-            if len(dbo_results) < k:
-                dbo_results.append(item)
-
-        if len(dbo_results) >= k and len(dbp_results) >= k:
-            break
-
-    # Interleave: return top dbo results first, then top dbp results, up to k total
-    # This ensures the LLM sees both namespaces
     results = []
-    dbo_take = min(len(dbo_results), max(1, k // 2))
-    results.extend(dbo_results[:dbo_take])
-    remaining = k - len(results)
-    results.extend(dbp_results[:remaining])
+    for score_t, idx_t in zip(top_results.values[0], top_results.indices[0]):
+        uri = _uris[idx_t.item()]
+        label = _labels[idx_t.item()]
 
-    # Sort by score descending for clean presentation
-    results.sort(key=lambda x: x["score"], reverse=True)
-    results = results[:k]
+        # Filter by type if requested
+        is_class = label and label[0].isupper() and "ontology" in uri
+        if is_class and not classes:
+            continue
+        if not is_class and not properties:
+            continue
 
-    # Annotate with triple counts from the frequency table
-    freqs = _get_predicate_freqs()
-    for r in results:
-        r["triples"] = freqs.get(r["uri"], 0)
+        raw_cosine = score_t.item()
+        confidence_pct = ((raw_cosine + 1) / 2) * 100
+
+        results.append({
+            "uri": uri,
+            "label": label,
+            "score": round(raw_cosine, 4),
+            "confidence_pct": round(confidence_pct, 1),
+            "source": "nomic",
+        })
+
+        if len(results) >= k:
+            break
 
     return results
 
 
 def lookup_classes(term, k=5):
-    """Lookup only ontology classes."""
-    return lookup_term(term, classes=True, properties=False, k=k)
+    """Look up only ontology Classes (for rdf:type constraints)."""
+    return lookup_term(term, k=k, classes=True, properties=False)
 
 
 def lookup_properties(term, k=5):
-    """Lookup only ontology properties."""
-    return lookup_term(term, classes=False, properties=True, k=k)
+    """Look up only ontology properties (for predicates)."""
+    return lookup_term(term, k=k, classes=False, properties=True)
