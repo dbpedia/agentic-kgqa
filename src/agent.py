@@ -427,48 +427,42 @@ class KGQAAgent:
     def _format_ontology_context(self, ontology_terms):
         """Format ontology lookup results for LLM prompts.
 
-        Groups dbo/dbp pairs together so the LLM sees them as alternatives.
+        Separates Properties (use as predicates) from Classes (use for rdf:type only).
+        Shows rdfs:domain and rdfs:range for each property candidate from Schema Introspector.
         """
         out = ""
         for concept, results in ontology_terms.items():
             out += f"Concept \"{concept}\":\n"
-            # Group by property name (last path segment)
-            seen_names = {}
-            ungrouped = []
-            for r in results:
-                uri = r["uri"]
-                name = uri.rsplit("/", 1)[-1]
-                is_dbo = "dbpedia.org/ontology/" in uri
-                is_dbp = "dbpedia.org/property/" in uri
-                if is_dbo or is_dbp:
-                    ns = "dbo" if is_dbo else "dbp"
-                    key = name.lower()
-                    if key not in seen_names:
-                        seen_names[key] = {}
-                    seen_names[key][ns] = r
-                else:
-                    ungrouped.append(r)
 
-            # Output grouped pairs first
-            for name, variants in seen_names.items():
-                dbo = variants.get("dbo")
-                dbp = variants.get("dbp")
-                if dbo and dbp:
-                    dbo_t = f"{dbo.get('triples', 0):,}"
-                    dbp_t = f"{dbp.get('triples', 0):,}"
-                    out += f"  - dbo: {dbo['uri']} ({dbo_t} triples) / dbp: {dbp['uri']} ({dbp_t} triples) — use dbo:\n"
-                elif dbo:
-                    t = f"{dbo.get('triples', 0):,}"
-                    out += f"  - {dbo['uri']} ({dbo['type']}, {t} triples)\n"
-                elif dbp:
-                    t = f"{dbp.get('triples', 0):,}"
-                    out += f"  - {dbp['uri']} ({dbp['type']}, {t} triples) — no dbo: equivalent, use this\n"
+            # Split into properties and classes based on URI naming convention
+            # dbo: Classes start with uppercase (e.g. dbo:Film, dbo:Actor)
+            # dbo: properties start with lowercase (e.g. dbo:starring, dbo:director)
+            properties = [
+                r for r in results
+                if not r["uri"].split("/")[-1][0].isupper()
+            ]
+            classes = [
+                r for r in results
+                if r["uri"].split("/")[-1][0].isupper()
+            ]
 
-            # Output ungrouped (classes etc.)
-            for r in ungrouped:
-                triples = r.get('triples', 0)
-                t_str = f"{triples:,} triples" if triples else "0 triples"
-                out += f"  - {r['uri']} ({r['type']}, {t_str})\n"
+            if properties:
+                out += "  Properties (use as predicates):\n"
+                for r in properties:
+                    uri = r["uri"]
+                    conf = r.get("confidence_pct", round(r.get("score", 0) * 100, 1))
+                    domain = r.get("domain") or "unknown"
+                    range_ = r.get("range") or "unknown"
+                    ns = "dbo:" if "ontology" in uri else "dbp:"
+                    out += f"    - {uri} (domain: {domain}, range: {range_}, score: {conf}%) — use {ns}\n"
+
+            if classes:
+                out += "  Classes (use only for rdf:type constraints, NOT as predicates):\n"
+                for r in classes:
+                    uri = r["uri"]
+                    conf = r.get("confidence_pct", round(r.get("score", 0) * 100, 1))
+                    out += f"    - {uri} (score: {conf}%)\n"
+
         return out
 
     def _generate_sparql(self, question, linked_entities, ontology_terms, analysis, model=None):
