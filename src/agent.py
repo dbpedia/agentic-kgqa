@@ -491,7 +491,10 @@ class KGQAAgent:
                 "content": (
                     f"Generate a SPARQL query for this question.\n\n"
                     f"Question: {question}\n\n"
-                    f"Answer type: {analysis.get('answer_type', 'unknown')}\n\n"
+                    f"Answer type: {analysis.get('answer_type', 'unknown')}\n"
+                    f"Aggregator: {analysis.get('aggregator', 'NONE')}\n"
+                    f"Join type: {analysis.get('join_type', 'SINGLE')}\n"
+                    f"Has type filter: {analysis.get('has_type_filter', False)}\n\n"
                     f"Linked entities:\n{entity_context}\n"
                     f"Relevant ontology terms:\n{ontology_context}\n"
                     f"Output ONLY the SPARQL query."
