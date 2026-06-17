@@ -324,7 +324,21 @@ class KGQAAgent:
                 "content": (
                     f"Analyse this question and extract entities and concepts.\n"
                     f"Question: {question}\n\n"
-                    f"Output your analysis as JSON with keys: entities, answer_type, concepts."
+                    f"Output your analysis as JSON with these exact keys:\n"
+                    f"- entities: list of named entities (people, places, organisations, works)\n"
+                    f"- answer_type: one of resource, literal, count, boolean, list\n"
+                    f"- concepts: list of relationship/property keywords\n"
+                    f"- aggregator: one of NONE, COUNT, SUM, GROUP_BY, ORDER_BY_DESC, ORDER_BY_ASC\n"
+                    f"  (NONE = plain SELECT, COUNT = how many, SUM = total of values, GROUP_BY = list ranked by count, ORDER_BY_DESC/ASC = top-N or ranked list)\n"
+                    f"- join_type: one of INTERSECTION, UNION, SINGLE\n"
+                    f"  (INTERSECTION = question asks what two entities have IN COMMON using 'and', UNION = question asks about either entity using 'or', SINGLE = normal single-entity question)\n"
+                    f"- has_type_filter: true if the question explicitly asks for a category like 'which movies', 'list countries', 'how many companies' etc, false otherwise\n\n"
+                    f"Examples:\n"
+                    f"Q: How many movies directed by Nolan? -> aggregator=COUNT, join_type=SINGLE, has_type_filter=true\n"
+                    f"Q: Where were JK Rowling and Einstein born? -> aggregator=NONE, join_type=INTERSECTION, has_type_filter=false\n"
+                    f"Q: Which organizations were founded in 1990? -> aggregator=NONE, join_type=SINGLE, has_type_filter=true\n"
+                    f"Q: List 10 countries by population -> aggregator=ORDER_BY_DESC, join_type=SINGLE, has_type_filter=true\n"
+                    f"Q: How many people study at California universities? -> aggregator=SUM, join_type=SINGLE, has_type_filter=true"
                 ),
             },
         ]
