@@ -60,17 +60,47 @@ Rules:
   Property:  <http://dbpedia.org/property/...> (dbp — raw infobox, use ONLY when no dbo: equivalent exists)
   RDF type:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
 - PROPERTY SELECTION:
-  The ontology lookup results show dbo/dbp pairs with triple counts.
-  ALWAYS use the dbo: (ontology) variant when one exists, regardless of triple counts.
+  The ontology lookup results show ranked candidates with confidence scores.
+  ALWAYS reason over all candidates before choosing — consider the question wording and each candidate's label.
+  The top-ranked candidate (highest score) has strong semantic similarity to the concept — give it extra weight.
+  Only choose a lower-ranked candidate if its label is a significantly better match for the specific wording of the question.
+  Example: for concept 'author', top-1 is dbo:author (88%) and dbo:writer (81%) also appears. The question says 'written' but dbo:author is the canonical DBpedia property — prefer dbo:author unless the question specifically says 'writer'.
+  Example: for concept 'country', if the question says 'where does X START' or 'source of X', prefer dbo:sourceCountry over dbo:country even if dbo:country ranks higher — the question's 'start/source' word signals a more specific predicate.
+  ALWAYS use the dbo: (ontology) variant when one exists, regardless of scores.
   Use dbp: ONLY when the results show no dbo: equivalent for that concept.
-  Triple counts are shown for reference — do NOT use them to choose between dbo: and dbp:.
   Do NOT invent property names — use URIs from the ontology lookup results provided to you.
-- TYPE CONSTRAINTS: When the question explicitly asks about a category ("which countries", "how many movies",
-  "list the companies") and the ontology lookup returns a matching Class, add an rdf:type constraint.
-  Do NOT add rdf:type for multi-hop queries where the typed entity is an intermediate variable.
+- AGGREGATION: Use the aggregator field from the analysis:
+  COUNT -> SELECT DISTINCT COUNT(?var) WHERE (no AS alias)
+  SUM -> SELECT SUM(?var) WHERE
+  GROUP_BY -> SELECT ?var WHERE { ... } GROUP BY ?var ORDER BY DESC(COUNT(...))
+  ORDER_BY_DESC -> ORDER BY DESC(?var) LIMIT N
+  ORDER_BY_ASC -> ORDER BY ASC(?var)
+  NONE -> plain SELECT DISTINCT
+- JOIN TYPE: Use the join_type field from the analysis:
+  INTERSECTION -> shared variable pattern: <X> pred ?uri . <Y> pred ?uri (finds common values)
+  UNION -> { <X> pred ?uri } UNION { <Y> pred ?uri } (finds values from either)
+  SINGLE -> normal single triple pattern
+- TYPE FILTER: If has_type_filter is true, add rdf:type constraint using the matching Class from ontology results.
+- DOMAIN/RANGE GUIDANCE: The ontology terms include domain and range metadata.
+  Use domain to validate the subject type — if domain=Film and the variable is the subject, optionally add rdf:type dbo:Film.
+  Use range to understand the return type — if range=nonNegativeInteger the result is a number not a URI.
+  Only add rdf:type from domain/range when the question asks for a specific category AND the domain/range matches that category.
+- MULTI-ENTITY QUESTIONS: When a question asks about TWO entities using 'and' (e.g. 'Where were X and Y born?', 'What did X and Y have in common?'), use a JOIN pattern with a shared variable — NOT a UNION.
+  CORRECT: <X> dbo:birthPlace ?uri . <Y> dbo:birthPlace ?uri  (finds places where BOTH were born)
+  WRONG:   { <X> dbo:birthPlace ?uri } UNION { <Y> dbo:birthPlace ?uri }  (finds places where EITHER was born)
+  Use UNION only when the question explicitly says 'or' or asks for results from either entity separately.
 - TRIPLE DIRECTION: Use the entity linking URI as the subject or object based on what makes sense.
   For "who is X's spouse" → X dbo:spouse ?uri. For "who married X" → ?uri dbo:spouse X.
   Keep the same direction as you would in natural language.
+  IMPORTANT: Use domain/range metadata to determine correct triple direction.
+  If domain=Film and one entity is a Film while another is a Person, the Film must be the subject.
+  If domain=Organisation and the linked entities are Products (not Organisations), then the Organisation is the UNKNOWN variable (?uri) as subject, and the Products are the objects:
+    CORRECT: ?uri dbo:product <IPhone> . ?uri dbo:product <IPad>  (finding unknown Organisation)
+    WRONG:   <IPhone> dbo:product ?uri  (iPhone is not an Organisation)
+  Example: dbo:starring has domain=Work, range=Actor. Film is subject, Person is object:
+    CORRECT: <Film> dbo:starring <Person>
+    WRONG:   <Person> dbo:starring <Film>
+  Rule: the linked entity goes in the position (subject or object) that matches its type against domain/range.
 - ALWAYS use SELECT DISTINCT for queries that return resource URIs or literal values.
 - For boolean questions, use ASK WHERE { ... }.
 - For count questions, use SELECT DISTINCT COUNT(?var) WHERE { ... } (no AS alias).
