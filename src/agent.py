@@ -292,9 +292,8 @@ IMPORTANT: prefer SIMPLIFYING the query over adding UNION branches. The revised 
 stay as close as possible to the original translation. Apply fixes in this order of preference:
 
 1. Remove rdf:type constraints (the most common cause of 0 results — entities are often not typed as expected)
-2. Swap dbo: properties to their dbp: equivalents (e.g. <.../ontology/director> -> <.../property/director>)
-3. Try a synonym property from the ontology lookup (e.g. dbo:author -> dbo:writer)
-4. Only as a last resort, add a UNION — and keep it minimal
+2. Try a synonym property from the ontology lookup (e.g. dbo:author -> dbo:writer)
+3. Only as a last resort, add a UNION — and keep it minimal
 
 ALWAYS use full URIs in angle brackets. NEVER use PREFIX declarations.
 
@@ -313,6 +312,17 @@ Relevant ontology terms:
 
 Output ONLY the revised SPARQL query.
 """
+
+
+def _swap_dbo_to_dbp(sparql):
+    """Deterministically swap dbo: predicate URIs to dbp: equivalents.
+
+    This is the first fallback step in the executor — faster and more reliable
+    than asking the LLM to perform the swap inside a revision prompt.
+    """
+    return sparql.replace(
+        "http://dbpedia.org/ontology/", "http://dbpedia.org/property/"
+    )
 
 
 def _needs_revision(exec_result):
@@ -564,24 +574,44 @@ class KGQAAgent:
         return _extract_sparql(response)
 
     def _verify_and_revise(self, question, sparql, linked_entities, ontology_terms, analysis, model=None):
-        """Execute query and revise up to MAX_RETRIES times if results look wrong."""
-        for attempt in range(MAX_RETRIES + 1):
+        """Execute query with deterministic dbo->dbp fallback then LLM revision.
+
+        Steps:
+          1. Execute original dbo: query.
+          2. If 0 results: swap dbo->dbp deterministically and retry.
+          3. If still 0 results: LLM revision up to MAX_RETRIES times.
+        """
+        # Step 1: initial execution
+        result = execute_sparql(sparql)
+        needs_fix, reason = _needs_revision(result)
+
+        if not needs_fix:
+            return sparql, result, 1
+
+        # Step 2: deterministic dbo->dbp swap
+        swapped = _swap_dbo_to_dbp(sparql)
+        if swapped != sparql:
+            logger.info("Retrying with dbo->dbp namespace swap...")
+            result = execute_sparql(swapped)
+            needs_fix, reason = _needs_revision(result)
+            if not needs_fix:
+                return swapped, result, 2
+            sparql = swapped  # continue LLM revision from swapped query
+
+        # Step 3: LLM-based revision
+        for attempt in range(MAX_RETRIES):
+            logger.info(f"LLM revision attempt {attempt + 1}: {reason}...")
+            sparql = self._revise_sparql(
+                question, sparql, result, linked_entities, ontology_terms, analysis, model=model
+            )
+            logger.info(f"Revised SPARQL: {sparql}")
             result = execute_sparql(sparql)
             needs_fix, reason = _needs_revision(result)
-
             if not needs_fix:
-                return sparql, result, attempt
+                return sparql, result, attempt + 3
 
-            if attempt < MAX_RETRIES:
-                logger.info(f"Attempt {attempt + 1}: {reason}, revising query...")
-                sparql = self._revise_sparql(
-                    question, sparql, result, linked_entities, ontology_terms, analysis, model=model
-                )
-                logger.info(f"Revised SPARQL: {sparql}")
-            else:
-                logger.info(f"Max retries reached, returning last query despite {reason}")
-
-        return sparql, result, MAX_RETRIES
+        logger.info(f"Max retries reached, returning last query despite {reason}")
+        return sparql, result, MAX_RETRIES + 2
 
     def answer(self, question, model=None):
         """Full pipeline: question -> SPARQL query with self-correction."""
