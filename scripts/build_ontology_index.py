@@ -5,15 +5,24 @@ This script builds a semantic search index over DBpedia ontology properties and 
 It must be run once before using the Ontology Explorer node in the pipeline.
 
 Sources:
-  1. dbo: properties and Classes — parsed from data/dbpedia_2015-10.nt using RDFLib.
-     These have formal English labels and comments from the DBpedia ontology schema.
-     Stored with label + comment as document text for richer semantic matching.
+  1. dbo: properties and Classes — parsed from data/dbpedia-20250806.owl.rdf using RDFLib.
+     The OWL file has more entries (3818) than the NT file (3572), has richer label and
+     comment coverage, and is already used by the Schema Introspector for domain/range
+     lookup — making it the single source for all dbo work.
 
-  2. dbp: properties — extracted from data/ontology-vectors.w2v.
-     Only dbp: properties that have NO exact dbo: equivalent are included.
-     Properties with exact dbo: equivalents are skipped because the Query Executor
-     handles those via a deterministic dbo->dbp namespace swap at runtime.
-     dbp: properties have no formal labels so they are embedded using camelCase-split name only.
+  2. dbp: properties — parsed from data/dbp-part1.rdf and data/dbp-part2.rdf.
+     These files were downloaded from the DBpedia SPARQL endpoint using an owl:Thing
+     anchor query, which captures ghost properties like dbp:numLocations that exist in
+     DBpedia data but are not formally typed as rdf:Property in the schema.
+     Only dbp: properties with no exact dbo: equivalent are included. Properties with
+     exact dbo: equivalents are skipped because the Query Executor handles those via a
+     deterministic dbo->dbp namespace swap at runtime.
+
+     Noise filters applied to dbp: properties:
+       - Names <= 3 characters (e.g. dbp:nat, dbp:rev, dbp:mc)
+       - Names containing '%' (URL-encoded, e.g. dbp:votes%25)
+       - Names containing '_' (non-standard infobox keys, e.g. dbp:lat_deg)
+       - Names starting with a digit (e.g. dbp:1stRound, dbp:2014Population)
 
 Output (saved to data/):
   - nomic_embeddings.pt   — PyTorch tensor of shape [N, 768]
@@ -27,6 +36,7 @@ Run once:
 
 import json
 import re
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
@@ -40,8 +50,11 @@ from sentence_transformers import SentenceTransformer
 BASE_DIR = Path(__file__).parent.parent           # agentic-kgqa/
 DATA_DIR = BASE_DIR / "data"
 
-NT_FILE   = DATA_DIR / "dbpedia_2015-10.nt"       # DBpedia ontology schema
-W2V_FILE  = DATA_DIR / "ontology-vectors.w2v"     # word2vec index (for extracting dbp: URIs. Refer to Readme.md.)
+OWL_FILE      = DATA_DIR / "dbpedia-20250806.owl.rdf"
+DBP_RDF_FILES = [
+    DATA_DIR / "dbp-part1.rdf",
+    DATA_DIR / "dbp-part2.rdf",
+]
 
 EMBEDDINGS_PATH = DATA_DIR / "nomic_embeddings.pt"
 URIS_PATH       = DATA_DIR / "nomic_uris.json"
@@ -55,17 +68,21 @@ def split_camel(s):
     return re.sub("([A-Z][a-z]+)", r" \1", re.sub("([A-Z]+)", r" \1", s)).strip()
 
 
-# ─── Source 1: dbo: entries from NT file ──────────────────────────────────────
+# ─── Source 1: dbo: entries from OWL file ─────────────────────────────────────
 
-def extract_dbo_from_nt(nt_file):
-    """Parse dbpedia_2015-10.nt and extract dbo: Classes and properties
+def extract_dbo_from_owl(owl_file):
+    """Parse dbpedia-20250806.owl.rdf and extract dbo: Classes and properties
     with their English labels and comments.
+
+    The OWL file has more entries than the NT file (3818 vs 3572) and is already
+    used by the Schema Introspector for domain/range lookup, making it the single
+    source for all dbo work.
 
     Returns: list of (uri, label, doc_text) tuples.
     """
-    print(f"\nSource 1: Parsing NT file: {nt_file}")
+    print(f"\nSource 1: Parsing OWL file: {owl_file}")
     g = rdflib.Graph()
-    g.parse(str(nt_file), format="nt")
+    g.parse(str(owl_file), format="xml")
     print(f"  Loaded {len(g)} triples")
 
     prop_data = defaultdict(lambda: {"labels": set(), "comments": set()})
@@ -73,7 +90,7 @@ def extract_dbo_from_nt(nt_file):
 
     for ptype in property_types:
         for prop in g.subjects(RDF.type, ptype):
-            if isinstance(prop, rdflib.URIRef):
+            if isinstance(prop, rdflib.URIRef) and "dbpedia.org/ontology" in str(prop):
                 for label in g.objects(prop, RDFS.label):
                     if getattr(label, "language", None) in ["en", None]:
                         prop_data[prop]["labels"].add(str(label))
@@ -89,86 +106,120 @@ def extract_dbo_from_nt(nt_file):
         doc_text = f"search_document: {label}. {comment}".strip(". ")
         entries.append((str(prop_uri), label, doc_text))
 
-    print(f"  Extracted {len(entries)} dbo: entries")
+    print(f"  Extracted {len(entries)} dbo: entries from OWL file")
     return entries
 
 
-# ─── Source 2: unique dbp: entries from w2v file ──────────────────────────────
+# ─── Source 2: unique dbp: entries from local RDF files ───────────────────────
 
-def extract_unique_dbp_from_w2v(w2v_file, dbo_entries):
-    """Extract dbp: properties that have NO exact dbo: equivalent.
+def extract_dbp_from_rdf_files(dbo_entries, rdf_files=DBP_RDF_FILES):
+    """Extract dbp: properties from locally saved SPARQL result RDF files.
 
-    Strategy: if dbp:director exists AND dbo:director also exists, skip dbp:director.
-    The Query Executor handles dbo->dbp swap by string replacement at runtime, so
-    including both in the index would confuse the LLM with redundant choices.
-    Only include dbp: properties that are truly unique (no dbo: counterpart).
+    Reads dbp-part1.rdf and dbp-part2.rdf downloaded from the DBpedia SPARQL
+    endpoint using the owl:Thing anchor query. This approach captures ghost
+    properties like dbp:numLocations that exist in DBpedia data but are not
+    formally typed as rdf:Property in the schema.
+
+    Combines, deduplicates, and filters before returning.
+
+    Filters applied:
+      - Names <= 3 characters (noise/abbreviations like dbp:nat, dbp:mc)
+      - Names starting with a digit (e.g. dbp:1stRound)
+      - Names containing '%' (URL-encoded, e.g. dbp:votes%25)
+      - Names containing '_' (non-standard infobox keys)
+      - Names with exact dbo: equivalent (runtime swap handles these)
 
     Returns: list of (uri, label, doc_text) tuples.
     """
-    print(f"\nSource 2: Extracting unique dbp: URIs from w2v file: {w2v_file}")
-    try:
-        from gensim.models import KeyedVectors
-        model = KeyedVectors.load_word2vec_format(str(w2v_file))
-    except Exception as e:
-        print(f"  WARNING: Could not load w2v file: {e}")
-        print("  Skipping dbp: entries — index will be dbo: only")
-        return []
+    print(f"\nSource 2: Parsing local RDF files for dbp: properties...")
 
-    # Build set of dbo: property names (lowercased) for deduplication
-    dbo_names = set()
-    for uri, _, _ in dbo_entries:
-        name = uri.split("/")[-1].lower()
-        dbo_names.add(name)
+    all_uris = set()
+    for rdf_file in rdf_files:
+        if not rdf_file.exists():
+            print(f"  WARNING: {rdf_file} not found — skipping")
+            continue
+        tree = ET.parse(str(rdf_file))
+        root = tree.getroot()
+        batch = {
+            elem.get("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}resource")
+            for elem in root.iter()
+            if elem.get(
+                "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}resource", ""
+            ).startswith("http://dbpedia.org/property/")
+        }
+        print(f"  {rdf_file.name}: {len(batch)} dbp: URIs")
+        all_uris |= batch
+
+    print(f"  Total unique dbp: URIs after combining: {len(all_uris)}")
+
+    # Build set of dbo: names (lowercased) for deduplication
+    dbo_names = {uri.split("/")[-1].lower() for uri, _, _ in dbo_entries}
 
     entries = []
-    skipped = 0
-    for key in model.key_to_index:
-        if "dbpedia.org/property/" not in key:
-            continue
-        uri = key.split("|", 1)[1] if "|" in key else key
+    skipped_equiv  = 0
+    skipped_noise  = 0
+
+    for uri in sorted(all_uris):
         raw_name = uri.split("/")[-1]
-        name_lower = raw_name.lower()
+
+        # Skip short names — noise/abbreviations (e.g. dbp:nat, dbp:mc, dbp:rev)
+        if len(raw_name) <= 3:
+            skipped_noise += 1
+            continue
+
+        # Skip URL-encoded names (e.g. dbp:votes%25)
+        if "%" in raw_name:
+            skipped_noise += 1
+            continue
+
+        # Skip underscore names — non-standard infobox keys (e.g. dbp:lat_deg)
+        if "_" in raw_name:
+            skipped_noise += 1
+            continue
+
+        # Skip names starting with a digit (e.g. dbp:1stRound, dbp:2014Population)
+        if raw_name[0].isdigit():
+            skipped_noise += 1
+            continue
 
         # Skip if exact dbo: equivalent exists — runtime swap handles these
-        if name_lower in dbo_names:
-            skipped += 1
+        if raw_name.lower() in dbo_names:
+            skipped_equiv += 1
             continue
 
-        label = split_camel(raw_name)
+        label    = split_camel(raw_name)
         doc_text = f"search_document: {label}"
         entries.append((uri, label, doc_text))
 
-    print(f"  Skipped {skipped} dbp: entries that have dbo: equivalents")
-    print(f"  Kept {len(entries)} unique dbp: entries (no dbo: counterpart)")
+    print(f"  Skipped {skipped_equiv} dbp: entries with exact dbo: equivalents")
+    print(f"  Skipped {skipped_noise} noise entries (short/encoded/underscore/digit-start)")
+    print(f"  Kept {len(entries)} unique dbp: entries")
     return entries
 
 
 # ─── Build Index ──────────────────────────────────────────────────────────────
 
 def build_index():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
     print("=" * 60)
     print("Building Nomic Embed v1.5 ontology index")
+    print(f"dbo source : {OWL_FILE.name}")
+    print(f"dbp source : {', '.join(f.name for f in DBP_RDF_FILES)}")
     print("=" * 60)
 
-    # Check required files exist
-    missing = [f for f in [NT_FILE, W2V_FILE] if not f.exists()]
-    if missing:
-        print("\nERROR: Required data files not found:")
-        for f in missing:
-            print(f"  {f}")
-        print("\nRequired files:")
-        print("  data/dbpedia_2015-10.nt     — DBpedia ontology NT file")
-        print("  data/ontology-vectors.w2v   ")
-        print("\nPlease refer to Readme.md.")
+    if not OWL_FILE.exists():
+        print(f"\nERROR: OWL file not found: {OWL_FILE}")
+        print("Please refer to README.md for setup instructions.")
         return
 
-    # Source 1: dbo entries with labels + comments
-    dbo_entries = extract_dbo_from_nt(NT_FILE)
+    # Source 1: dbo entries from OWL file
+    dbo_entries = extract_dbo_from_owl(OWL_FILE)
 
-    # Source 2: unique dbp entries with no dbo equivalent
-    dbp_entries = extract_unique_dbp_from_w2v(W2V_FILE, dbo_entries)
+    # Source 2: unique dbp entries from local RDF files
+    dbp_entries = extract_dbp_from_rdf_files(dbo_entries)
 
-    # Combine dbo first, then unique dbp
+    # Combine — dbo first, then unique dbp
     all_entries = dbo_entries + dbp_entries
 
     # Deduplicate by URI (dbo: takes priority)
@@ -179,8 +230,8 @@ def build_index():
             seen_uris.add(uri)
             unique_entries.append((uri, label, doc_text))
 
-    uris          = [e[0] for e in unique_entries]
-    labels        = [e[1] for e in unique_entries]
+    uris           = [e[0] for e in unique_entries]
+    labels         = [e[1] for e in unique_entries]
     document_texts = [e[2] for e in unique_entries]
 
     print(f"\nTotal unique entries: {len(unique_entries)}")
@@ -194,7 +245,7 @@ def build_index():
         "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True, device=device
     )
 
-    print("Embedding all entries.")
+    print("Embedding all entries (this takes ~50 seconds on CPU)...")
     embeddings = model.encode(
         document_texts, convert_to_tensor=True, show_progress_bar=True
     )

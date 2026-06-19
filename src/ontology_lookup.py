@@ -59,14 +59,14 @@ def _load_index():
 
 # ─── Semantic lookup ───────────────────────────────────────────────────────────────
 
-def lookup_term(term, k=5, classes=True, properties=True):
+def lookup_term(term, k=10, classes=True, properties=True):
     """Look up an ontology term by natural language description.
 
     Returns top-k semantically similar entries from the Nomic index.
 
     Args:
         term:       Natural language concept (e.g. "director", "birthplace")
-        k:          Number of results to return
+        k:          Number of results to return (default 10)
         classes:    Include OWL Classes in results (default True)
         properties: Include OWL Properties in results (default True)
 
@@ -114,11 +114,11 @@ def lookup_term(term, k=5, classes=True, properties=True):
     return results
 
 
-def lookup_classes(term, k=5):
+def lookup_classes(term, k=10):
     """Look up only ontology Classes (for rdf:type constraints)."""
     return lookup_term(term, k=k, classes=True, properties=False)
 
 
-def lookup_properties(term, k=5):
+def lookup_properties(term, k=10):
     """Look up only ontology properties (for predicates)."""
     return lookup_term(term, k=k, classes=False, properties=True)

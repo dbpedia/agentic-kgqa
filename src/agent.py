@@ -460,7 +460,7 @@ class KGQAAgent:
         """
         ontology = {}
         for concept in concepts:
-            results = lookup_term(concept, k=5)
+            results = lookup_term(concept)
             results = schema_introspector.enrich(results)
             ontology[concept] = results
         return ontology
