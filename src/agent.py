@@ -929,30 +929,32 @@ class KGQAAgent:
         logger.info(f"Max retries reached, returning last query despite {reason}")
         return sparql, result, MAX_RETRIES + 2
 
-    def answer(self, question, model=None):
-        """Full pipeline: question -> SPARQL query with self-correction."""
-        logger.info(f"Processing question: {question}")
+    def _answer_sequential(self, question, model=None):
+        """Sequential pipeline fallback used by CorporateKGQAAgent subclass.
 
-        # Step 1: Analyse
+        CorporateKGQAAgent overrides _link_entities, _lookup_ontology,
+        _generate_sparql, _revise_sparql and _verify_and_revise. These overrides
+        are bypassed when using build_graph() since the graph calls standalone
+        node functions directly. This method preserves the old sequential flow
+        so subclass overrides continue to work correctly.
+        """
+        logger.info(f"Processing question (sequential): {question}")
+
         analysis = self._analyse_question(question, model=model)
         logger.info(f"Analysis: {analysis}")
 
         entities = analysis.get("entities", [])
         concepts = analysis.get("concepts", [])
 
-        # Step 2: Entity linking
         linked_entities = self._link_entities(entities, question=question, model=model)
         logger.info(f"Linked entities: {linked_entities}")
 
-        # Step 3: Ontology lookup
         ontology_terms = self._lookup_ontology(concepts)
         logger.info(f"Ontology terms found for {len(ontology_terms)} concepts")
 
-        # Step 4: Generate SPARQL
         sparql = self._generate_sparql(question, linked_entities, ontology_terms, analysis, model=model)
         logger.info(f"Generated SPARQL: {sparql}")
 
-        # Step 5: Verify and revise
         sparql, exec_result, attempts = self._verify_and_revise(
             question, sparql, linked_entities, ontology_terms, analysis, model=model
         )
@@ -960,6 +962,20 @@ class KGQAAgent:
             logger.info(f"Query revised {attempts} time(s)")
 
         return sparql
+
+    def answer(self, question, model=None):
+        """Full pipeline: question -> SPARQL query.
+
+        For KGQAAgent instances uses the compiled LangGraph graph.
+        For subclasses (e.g. CorporateKGQAAgent) falls back to the sequential
+        pipeline so their method overrides are respected.
+        """
+        if type(self) is KGQAAgent:
+            logger.info(f"Processing question (graph): {question}")
+            graph = build_graph(redis_el=self.redis_el, model=model)
+            result = graph.invoke({"question": question, "model": model})
+            return result["sparql"]
+        return self._answer_sequential(question, model=model)
 
     def answer_stream(self, question, model=None):
         """Streaming pipeline that yields (step_name, data) tuples for each stage."""
