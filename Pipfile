@@ -17,6 +17,9 @@ torch = "*"
 sentence-transformers = "*"
 einops = "*"
 rdflib = "*"
+ollama = "*"
+aiohttp = "*"
+langgraph = "*"
 
 [dev-packages]
 ipykernel = "*"

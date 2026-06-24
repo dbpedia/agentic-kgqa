@@ -8,6 +8,7 @@ import logging
 
 import urllib.parse
 import urllib.request
+from typing import TypedDict, Optional
 
 from openai import OpenAI
 import dotenv
@@ -344,6 +345,361 @@ def _needs_revision(exec_result):
     return False, None
 
 
+# ─── LangGraph State ─────────────────────────────────────────────────────────
+
+class KGQAState(TypedDict):
+    """Typed state that flows through all LangGraph nodes.
+
+    Each node receives the full state, performs its task, and returns
+    only the fields it updates. LangGraph merges updates back automatically.
+    """
+    # Input
+    question:         str
+    model:            Optional[str]
+
+    # Planner node output
+    entities:         list
+    concepts:         list
+    answer_type:      str
+    aggregator:       str
+    join_type:        str
+    has_type_filter:  bool
+
+    # Entity Linker node output
+    linked_entities:  dict
+
+    # Ontology Explorer + Schema Introspector node output
+    ontology_terms:   dict
+
+    # Query Builder node output
+    sparql:           str
+
+    # Query Executor node output
+    exec_result:      dict
+    attempts:         int
+    swap_attempted:   bool
+
+    # Validator node output
+    is_valid:         bool
+    retry_target:     str   # "query_builder" | "entity_linker" | "end"
+
+
+# ─── Standalone Node Functions ────────────────────────────────────────────────
+# These functions mirror the KGQAAgent class methods and are used by the
+# LangGraph StateGraph. The KGQAAgent class methods remain intact for
+# backward compatibility with CorporateKGQAAgent and existing callers.
+
+def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
+    """Planner node: analyse the question and extract entities, concepts, and
+    query metadata (aggregator, join_type, has_type_filter).
+
+    Corresponds to KGQAAgent._analyse_question().
+    Returns partial state update.
+    """
+    question = state["question"]
+    model = model or state.get("model") or DEFAULT_MODEL
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Analyse this question and extract entities and concepts.\n"
+                f"Question: {question}\n\n"
+                f"Output your analysis as JSON with these exact keys:\n"
+                f"- entities: list of named entities (people, places, organisations, works)\n"
+                f"- answer_type: one of resource, literal, count, boolean, list\n"
+                f"- concepts: list of relationship/property keywords\n"
+                f"- aggregator: one of NONE, COUNT, SUM, GROUP_BY, ORDER_BY_DESC, ORDER_BY_ASC\n"
+                f"  (NONE = plain SELECT, COUNT = how many, SUM = total of values, "
+                f"GROUP_BY = list ranked by count, ORDER_BY_DESC/ASC = top-N or ranked list)\n"
+                f"- join_type: one of INTERSECTION, UNION, SINGLE\n"
+                f"  (INTERSECTION = question asks what two entities have IN COMMON using 'and', "
+                f"UNION = question asks about either entity using 'or', "
+                f"SINGLE = normal single-entity question)\n"
+                f"- has_type_filter: true if the question explicitly asks for a category "
+                f"like 'which movies', 'list countries', 'how many companies' etc, false otherwise\n\n"
+                f"Examples:\n"
+                f"Q: How many movies directed by Nolan? -> aggregator=COUNT, join_type=SINGLE, has_type_filter=true\n"
+                f"Q: Where were JK Rowling and Einstein born? -> aggregator=NONE, join_type=INTERSECTION, has_type_filter=false\n"
+                f"Q: Which organizations were founded in 1990? -> aggregator=NONE, join_type=SINGLE, has_type_filter=true\n"
+                f"Q: List 10 countries by population -> aggregator=ORDER_BY_DESC, join_type=SINGLE, has_type_filter=true\n"
+                f"Q: How many people study at California universities? -> aggregator=SUM, join_type=SINGLE, has_type_filter=true"
+            ),
+        },
+    ]
+    response = _chat(client, messages, model=model)
+    analysis = _extract_json(response)
+
+    return {
+        "entities":        analysis.get("entities", []),
+        "concepts":        analysis.get("concepts", []),
+        "answer_type":     analysis.get("answer_type", "resource"),
+        "aggregator":      analysis.get("aggregator", "NONE"),
+        "join_type":       analysis.get("join_type", "SINGLE"),
+        "has_type_filter": analysis.get("has_type_filter", False),
+    }
+
+
+def entity_linker_node(state: KGQAState, redis_el, client, model: Optional[str] = None) -> dict:
+    """Entity Linker node: link entity mentions to DBpedia resource URIs via Redis.
+
+    Corresponds to KGQAAgent._link_entities() + KGQAAgent._disambiguate_entity().
+    Returns partial state update.
+    """
+    entities = state["entities"]
+    question = state["question"]
+    model = model or state.get("model") or DEFAULT_MODEL
+    linked = {}
+
+    for entity in entities:
+        if redis_el is None:
+            uri = "http://dbpedia.org/resource/" + entity.replace(" ", "_")
+            linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
+            continue
+
+        results = redis_el.lookup(entity, top_k=5, thr=0.01)
+        if len(results) > 0:
+            entries = []
+            for idx, row in results.iterrows():
+                uri = idx if isinstance(idx, str) else row.name
+                if not uri.startswith("http"):
+                    uri = "http://dbpedia.org/resource/" + uri
+                entries.append({"uri": uri, "score": round(row["score"], 4), "source": "redis"})
+            if question and len(entries) > 1:
+                entries = _disambiguate(client, question, entity, entries, model=model)
+            linked[entity] = entries
+        else:
+            uri = "http://dbpedia.org/resource/" + entity.replace(" ", "_")
+            linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
+
+    return {"linked_entities": linked}
+
+
+def ontology_explorer_node(state: KGQAState) -> dict:
+    """Ontology Explorer + Schema Introspector node: look up relevant ontology
+    terms for each concept and enrich with rdfs:domain and rdfs:range.
+
+    Corresponds to KGQAAgent._lookup_ontology().
+    Returns partial state update.
+    """
+    concepts = state["concepts"]
+    ontology = {}
+    for concept in concepts:
+        results = lookup_term(concept)
+        results = schema_introspector.enrich(results)
+        ontology[concept] = results
+    return {"ontology_terms": ontology}
+
+
+def query_builder_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
+    """Query Builder node: generate a SPARQL query from all available context.
+
+    Corresponds to KGQAAgent._generate_sparql().
+    Returns partial state update.
+    """
+    question        = state["question"]
+    linked_entities = state["linked_entities"]
+    ontology_terms  = state["ontology_terms"]
+    model = model or state.get("model") or DEFAULT_MODEL
+
+    # Reuse formatting helpers from KGQAAgent
+    entity_context   = _format_entity_context(linked_entities)
+    ontology_context = _format_ontology_context(ontology_terms)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Generate a SPARQL query for this question.\n\n"
+                f"Question: {question}\n\n"
+                f"Answer type: {state.get('answer_type', 'unknown')}\n"
+                f"Aggregator: {state.get('aggregator', 'NONE')}\n"
+                f"Join type: {state.get('join_type', 'SINGLE')}\n"
+                f"Has type filter: {state.get('has_type_filter', False)}\n\n"
+                f"Linked entities:\n{entity_context}\n"
+                f"Relevant ontology terms:\n{ontology_context}\n"
+                f"Output ONLY the SPARQL query."
+            ),
+        },
+    ]
+    response = _chat(client, messages, model=model)
+    sparql = _extract_sparql(response)
+
+    return {
+        "sparql":        sparql,
+        "attempts":      0,
+        "swap_attempted": False,
+    }
+
+
+def query_executor_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
+    """Query Executor node: execute the SPARQL query with deterministic dbo->dbp
+    fallback, then LLM revision if still failing.
+
+    Corresponds to KGQAAgent._verify_and_revise().
+    Returns partial state update.
+    """
+    question        = state["question"]
+    sparql          = state["sparql"]
+    linked_entities = state["linked_entities"]
+    ontology_terms  = state["ontology_terms"]
+    attempts        = state.get("attempts", 0)
+    swap_attempted  = state.get("swap_attempted", False)
+    model = model or state.get("model") or DEFAULT_MODEL
+
+    # Step 1: execute current sparql
+    exec_result = execute_sparql(sparql)
+    needs_fix, reason = _needs_revision(exec_result)
+
+    if not needs_fix:
+        return {
+            "exec_result":   exec_result,
+            "attempts":      attempts + 1,
+            "swap_attempted": swap_attempted,
+            "sparql":        sparql,
+        }
+
+    # Step 2: deterministic dbo->dbp swap (only once)
+    if not swap_attempted:
+        swapped = _swap_dbo_to_dbp(sparql)
+        if swapped != sparql:
+            logger.info("Retrying with dbo->dbp namespace swap...")
+            swap_result = execute_sparql(swapped)
+            swap_needs_fix, _ = _needs_revision(swap_result)
+            if not swap_needs_fix:
+                return {
+                    "exec_result":    swap_result,
+                    "sparql":         swapped,
+                    "attempts":       attempts + 1,
+                    "swap_attempted": True,
+                }
+            # Swap didn't help — continue with swapped query for LLM revision
+            sparql = swapped
+
+    # Step 3: LLM revision
+    entity_context   = _format_entity_context(linked_entities)
+    ontology_context = _format_ontology_context(ontology_terms)
+
+    if exec_result["type"] == "error":
+        exec_summary = f"Error: {exec_result['message']}"
+        problem = "a SPARQL error"
+    elif exec_result["type"] == "select" and exec_result["total"] == 0:
+        exec_summary = "The query executed successfully but returned 0 results."
+        problem = "0 results — the data is likely modelled differently than expected"
+    else:
+        exec_summary = json.dumps(exec_result, default=str)
+        problem = "unexpected results"
+
+    prompt = REVISION_PROMPT.format(
+        problem=problem,
+        question=question,
+        sparql=sparql,
+        exec_summary=exec_summary,
+        entity_context=entity_context,
+        ontology_context=ontology_context,
+    )
+    messages = [{"role": "user", "content": prompt}]
+    response = _chat(client, messages, model=model)
+    revised_sparql = _extract_sparql(response)
+    revised_result = execute_sparql(revised_sparql)
+
+    return {
+        "sparql":         revised_sparql,
+        "exec_result":    revised_result,
+        "attempts":       attempts + 1,
+        "swap_attempted": True,
+    }
+
+
+# ─── Formatting helpers (module-level for use by both node functions and KGQAAgent) ───
+
+def _format_entity_context(linked_entities: dict) -> str:
+    """Format linked entities for LLM prompts."""
+    out = ""
+    for mention, candidates in linked_entities.items():
+        top = candidates[0]
+        others = candidates[1:]
+        out += f"- \"{mention}\" -> {top['uri']} (score: {top['score']})"
+        if others:
+            alt_uris = ", ".join(c["uri"] for c in others)
+            out += f" | alternatives: {alt_uris}"
+        out += "\n"
+    return out
+
+
+def _format_ontology_context(ontology_terms: dict) -> str:
+    """Format ontology lookup results for LLM prompts.
+
+    Separates Properties (use as predicates) from Classes (use for rdf:type only).
+    Shows rdfs:domain and rdfs:range for each property candidate.
+    """
+    out = ""
+    for concept, results in ontology_terms.items():
+        out += f"Concept \"{concept}\":\n"
+        properties = [r for r in results if not r["uri"].split("/")[-1][0].isupper()]
+        classes    = [r for r in results if r["uri"].split("/")[-1][0].isupper()]
+
+        if properties:
+            out += "  Properties (use as predicates):\n"
+            for r in properties:
+                uri    = r["uri"]
+                conf   = r.get("confidence_pct", round(r.get("score", 0) * 100, 1))
+                domain = r.get("domain") or "unknown"
+                range_ = r.get("range") or "unknown"
+                ns     = "dbo:" if "ontology" in uri else "dbp:"
+                out += f"    - {uri} (domain: {domain}, range: {range_}, score: {conf}%) — use {ns}\n"
+
+        if classes:
+            out += "  Classes (use only for rdf:type constraints, NOT as predicates):\n"
+            for r in classes:
+                uri  = r["uri"]
+                conf = r.get("confidence_pct", round(r.get("score", 0) * 100, 1))
+                out += f"    - {uri} (score: {conf}%)\n"
+
+    return out
+
+
+def _disambiguate(client, question: str, mention: str, candidates: list, model: Optional[str] = None) -> list:
+    """Use LLM to pick the most contextually appropriate entity from Redis candidates.
+
+    Extracted from KGQAAgent._disambiguate_entity() for use in entity_linker_node.
+    Falls back to original list on failure.
+    """
+    if not candidates or len(candidates) == 1:
+        return candidates
+
+    candidate_list = "\n".join(
+        f"{i + 1}. {c['uri']} (score: {c['score']})"
+        for i, c in enumerate(candidates)
+    )
+    prompt = DISAMBIGUATION_PROMPT.format(
+        question=question,
+        mention=mention,
+        candidates=candidate_list,
+    )
+    try:
+        response = client.chat.completions.create(
+            model=model or DEFAULT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=10,
+        )
+        answer = response.choices[0].message.content
+        if answer is None:
+            return candidates
+        idx = int(answer.strip()) - 1
+        if 0 <= idx < len(candidates):
+            selected = candidates.pop(idx)
+            candidates.insert(0, selected)
+    except Exception:
+        pass
+    return candidates
+
+
+# ─── KGQAAgent ────────────────────────────────────────────────────────────────
+
 class KGQAAgent:
     """Agent that translates questions to SPARQL queries using entity linking and ontology lookup."""
 
@@ -467,16 +823,7 @@ class KGQAAgent:
 
     def _format_entity_context(self, linked_entities):
         """Format linked entities for LLM prompts."""
-        out = ""
-        for mention, candidates in linked_entities.items():
-            top = candidates[0]
-            others = candidates[1:]
-            out += f"- \"{mention}\" -> {top['uri']} (score: {top['score']})"
-            if others:
-                alt_uris = ", ".join(c["uri"] for c in others)
-                out += f" | alternatives: {alt_uris}"
-            out += "\n"
-        return out
+        return _format_entity_context(linked_entities)
 
     def _format_ontology_context(self, ontology_terms):
         """Format ontology lookup results for LLM prompts.
@@ -484,40 +831,7 @@ class KGQAAgent:
         Separates Properties (use as predicates) from Classes (use for rdf:type only).
         Shows rdfs:domain and rdfs:range for each property candidate from Schema Introspector.
         """
-        out = ""
-        for concept, results in ontology_terms.items():
-            out += f"Concept \"{concept}\":\n"
-
-            # Split into properties and classes based on URI naming convention
-            # dbo: Classes start with uppercase (e.g. dbo:Film, dbo:Actor)
-            # dbo: properties start with lowercase (e.g. dbo:starring, dbo:director)
-            properties = [
-                r for r in results
-                if not r["uri"].split("/")[-1][0].isupper()
-            ]
-            classes = [
-                r for r in results
-                if r["uri"].split("/")[-1][0].isupper()
-            ]
-
-            if properties:
-                out += "  Properties (use as predicates):\n"
-                for r in properties:
-                    uri = r["uri"]
-                    conf = r.get("confidence_pct", round(r.get("score", 0) * 100, 1))
-                    domain = r.get("domain") or "unknown"
-                    range_ = r.get("range") or "unknown"
-                    ns = "dbo:" if "ontology" in uri else "dbp:"
-                    out += f"    - {uri} (domain: {domain}, range: {range_}, score: {conf}%) — use {ns}\n"
-
-            if classes:
-                out += "  Classes (use only for rdf:type constraints, NOT as predicates):\n"
-                for r in classes:
-                    uri = r["uri"]
-                    conf = r.get("confidence_pct", round(r.get("score", 0) * 100, 1))
-                    out += f"    - {uri} (score: {conf}%)\n"
-
-        return out
+        return _format_ontology_context(ontology_terms)
 
     def _generate_sparql(self, question, linked_entities, ontology_terms, analysis, model=None):
         """Step 4: Use LLM to generate SPARQL given all the context."""
