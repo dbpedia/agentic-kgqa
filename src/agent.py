@@ -5,11 +5,13 @@ import json
 import os
 import re
 import logging
+import functools
 
 import urllib.parse
 import urllib.request
 from typing import TypedDict, Optional
 
+from langgraph.graph import StateGraph, END
 from openai import OpenAI
 import dotenv
 
@@ -1019,3 +1021,54 @@ class KGQAAgent:
                 yield ("revision", {"attempt": attempt + 1, "query": sparql})
 
         yield ("done", {"query": sparql})
+
+
+# ─── LangGraph ────────────────────────────────────────────────────────────────
+
+def build_graph(redis_el=None, model: Optional[str] = None):
+    """Build and compile the LangGraph StateGraph for the KGQA pipeline.
+
+    Wires all node functions into a linear StateGraph:
+      START -> planner -> entity_linker -> ontology_explorer
+             -> query_builder -> query_executor -> END
+
+    Node functions that require runtime dependencies (LLM client, Redis)
+    are wrapped with functools.partial to bind those dependencies at
+    graph construction time.
+
+    Args:
+        redis_el: RedisEntityLinking instance (or None for heuristic fallback)
+        model:    OpenRouter model ID to use (or None for DEFAULT_MODEL)
+
+    Returns:
+        A compiled LangGraph graph ready for graph.invoke({"question": ...})
+    """
+    client = _get_llm_client()
+
+    # Bind runtime dependencies to node functions via partial
+    bound_planner = functools.partial(planner_node, client=client, model=model)
+    bound_entity_linker = functools.partial(
+        entity_linker_node, redis_el=redis_el, client=client, model=model
+    )
+    bound_query_builder = functools.partial(query_builder_node, client=client, model=model)
+    bound_query_executor = functools.partial(query_executor_node, client=client, model=model)
+
+    # Build the graph
+    graph = StateGraph(KGQAState)
+
+    # Add nodes
+    graph.add_node("planner",          bound_planner)
+    graph.add_node("entity_linker",    bound_entity_linker)
+    graph.add_node("ontology_explorer", ontology_explorer_node)
+    graph.add_node("query_builder",    bound_query_builder)
+    graph.add_node("query_executor",   bound_query_executor)
+
+    # Add linear edges
+    graph.set_entry_point("planner")
+    graph.add_edge("planner",           "entity_linker")
+    graph.add_edge("entity_linker",     "ontology_explorer")
+    graph.add_edge("ontology_explorer", "query_builder")
+    graph.add_edge("query_builder",     "query_executor")
+    graph.add_edge("query_executor",    END)
+
+    return graph.compile()
