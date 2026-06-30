@@ -317,15 +317,32 @@ Output ONLY the revised SPARQL query.
 """
 
 
+_ONTOLOGY_URI_RE = re.compile(r"http://dbpedia\.org/ontology/([^\s<>\"'),.;]+)")
+
+
 def _swap_dbo_to_dbp(sparql):
-    """Deterministically swap dbo: predicate URIs to dbp: equivalents.
+    """Deterministically swap dbo: ontology URIs to dbp: property URIs —
+    PROPERTY positions only.
 
     This is the first fallback step in the executor — faster and more reliable
     than asking the LLM to perform the swap inside a revision prompt.
+
+    DBpedia naming convention: properties are lowerCamelCase, classes are
+    UpperCamelCase. There is no dbp: namespace equivalent for classes —
+    dbp:FictionalCharacter, dbp:TelevisionShow, dbp:Software etc do not exist.
+    A naive blanket ontology/ -> property/ replace corrupts any rdf:type
+    constraint in the query (silently turning a valid class URI into a
+    non-existent dbp: URI, which then always returns zero results), so this
+    only swaps dbo: URIs whose local name starts with a lowercase letter
+    (i.e. properties), leaving class URIs untouched.
     """
-    return sparql.replace(
-        "http://dbpedia.org/ontology/", "http://dbpedia.org/property/"
-    )
+    def _maybe_swap(match):
+        local_name = match.group(1)
+        if local_name and local_name[0].islower():
+            return f"http://dbpedia.org/property/{local_name}"
+        return match.group(0)  # leave class URIs (UpperCamelCase) untouched
+
+    return _ONTOLOGY_URI_RE.sub(_maybe_swap, sparql)
 
 
 def _needs_revision(exec_result):
