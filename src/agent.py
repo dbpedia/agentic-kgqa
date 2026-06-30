@@ -6,6 +6,7 @@ import os
 import re
 import logging
 import functools
+import unicodedata
 
 import urllib.parse
 import urllib.request
@@ -427,6 +428,9 @@ def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
                 f"Question: {question}\n\n"
                 f"Output your analysis as JSON with these exact keys:\n"
                 f"- entities: list of named entities (people, places, organisations, works)\n"
+                f"  IMPORTANT: Always extract the FULL FORMAL name of each entity as it would appear in Wikipedia.\n"
+                f"  Use all context clues in the question to reconstruct the complete official name.\n"
+                f"  Never abbreviate or shorten entity names — prefer the longest most specific form.\n"
                 f"- answer_type: one of resource, literal, count, boolean, list\n"
                 f"- concepts: list of relationship/property keywords\n"
                 f"- aggregator: one of NONE, COUNT, SUM, GROUP_BY, ORDER_BY_DESC, ORDER_BY_ASC\n"
@@ -460,6 +464,22 @@ def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
     }
 
 
+def _normalize_uri(uri: str) -> str:
+    """Normalize Unicode characters in DBpedia resource URIs.
+
+    Converts accented/special characters to their ASCII equivalents so
+    entity URIs match DBpedia's standard form.
+    e.g. University_of_Hawaiʻi_at_Mānoa -> University_of_Hawaii_at_Manoa
+    """
+    if "/resource/" not in uri:
+        return uri
+    prefix, resource = uri.split("/resource/", 1)
+    normalized     = unicodedata.normalize("NFD", resource)
+    ascii_resource = "".join(c for c in normalized if unicodedata.category(c) != "Mn" and ord(c) < 128)
+    ascii_resource = re.sub(r"_+", "_", ascii_resource)
+    return f"{prefix}/resource/{ascii_resource}"
+
+
 def entity_linker_node(state: KGQAState, redis_el, client, model: Optional[str] = None) -> dict:
     """Entity Linker node: link entity mentions to DBpedia resource URIs via Redis.
 
@@ -473,7 +493,7 @@ def entity_linker_node(state: KGQAState, redis_el, client, model: Optional[str] 
 
     for entity in entities:
         if redis_el is None:
-            uri = "http://dbpedia.org/resource/" + entity.replace(" ", "_")
+            uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
             linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
             continue
 
@@ -484,12 +504,13 @@ def entity_linker_node(state: KGQAState, redis_el, client, model: Optional[str] 
                 uri = idx if isinstance(idx, str) else row.name
                 if not uri.startswith("http"):
                     uri = "http://dbpedia.org/resource/" + uri
+                uri = _normalize_uri(uri)
                 entries.append({"uri": uri, "score": round(row["score"], 4), "source": "redis"})
             if question and len(entries) > 1:
                 entries = _disambiguate(client, question, entity, entries, model=model)
             linked[entity] = entries
         else:
-            uri = "http://dbpedia.org/resource/" + entity.replace(" ", "_")
+            uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
             linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
 
     return {"linked_entities": linked}
@@ -741,6 +762,9 @@ class KGQAAgent:
                     f"Question: {question}\n\n"
                     f"Output your analysis as JSON with these exact keys:\n"
                     f"- entities: list of named entities (people, places, organisations, works)\n"
+                    f"  IMPORTANT: Always extract the FULL FORMAL name of each entity as it would appear in Wikipedia.\n"
+                    f"  Use all context clues in the question to reconstruct the complete official name.\n"
+                    f"  Never abbreviate or shorten entity names — prefer the longest most specific form.\n"
                     f"- answer_type: one of resource, literal, count, boolean, list\n"
                     f"- concepts: list of relationship/property keywords\n"
                     f"- aggregator: one of NONE, COUNT, SUM, GROUP_BY, ORDER_BY_DESC, ORDER_BY_ASC\n"
@@ -770,7 +794,7 @@ class KGQAAgent:
         for entity in entities:
             if self.redis_el is None:
                 # Fallback: construct URI from entity name
-                uri = "http://dbpedia.org/resource/" + entity.replace(" ", "_")
+                uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
                 linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
                 continue
 
@@ -781,13 +805,14 @@ class KGQAAgent:
                     uri = idx if isinstance(idx, str) else row.name
                     if not uri.startswith("http"):
                         uri = "http://dbpedia.org/resource/" + uri
+                    uri = _normalize_uri(uri)
                     entries.append({"uri": uri, "score": round(row["score"], 4), "source": "redis"})
                 if question and len(entries) > 1:
                     entries = self._disambiguate_entity(question, entity, entries, model=model)
                 linked[entity] = entries
             else:
                 # Fallback
-                uri = "http://dbpedia.org/resource/" + entity.replace(" ", "_")
+                uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
                 linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
         return linked
 
