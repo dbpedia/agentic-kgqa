@@ -74,17 +74,40 @@ Rules:
   Use dbp: ONLY when the results show no dbo: equivalent for that concept.
   Do NOT invent property names — use URIs from the ontology lookup results provided to you.
 - AGGREGATION: Use the aggregator field from the analysis:
-  COUNT -> SELECT DISTINCT COUNT(?var) WHERE (no AS alias)
-  SUM -> SELECT SUM(?var) WHERE
-  GROUP_BY -> SELECT ?var WHERE { ... } GROUP BY ?var ORDER BY DESC(COUNT(...))
+  COUNT -> SELECT (COUNT(DISTINCT ?var) AS ?count) WHERE  <-- ALWAYS use this exact syntax for counts
+  SUM -> SELECT (SUM(?var) AS ?total) WHERE
+  GROUP_BY -> SELECT ?var WHERE { ... } GROUP BY ?var ORDER BY DESC(COUNT(DISTINCT ?var))
   ORDER_BY_DESC -> ORDER BY DESC(?var) LIMIT N
   ORDER_BY_ASC -> ORDER BY ASC(?var)
   NONE -> plain SELECT DISTINCT
+  CRITICAL: NEVER write SELECT DISTINCT COUNT(?var) -- this is invalid SPARQL.
+  ALWAYS write SELECT (COUNT(DISTINCT ?var) AS ?count) for count queries.
+  ALWAYS write SELECT (COUNT(DISTINCT ?var) AS ?count) for count questions like 'how many', 'count'.
+  For arithmetic expressions like 'difference between X and Y': SELECT (?val1 - ?val2 AS ?result)
 - JOIN TYPE: Use the join_type field from the analysis:
   INTERSECTION -> shared variable pattern: <X> pred ?uri . <Y> pred ?uri (finds common values)
   UNION -> { <X> pred ?uri } UNION { <Y> pred ?uri } (finds values from either)
   SINGLE -> normal single triple pattern
-- TYPE FILTER: If has_type_filter is true, add rdf:type constraint using the matching Class from ontology results.
+- HOP COUNT: Count how many distinct relationships the question describes in its chain, and match
+  that exactly with the number of triples (each introducing one new intermediate variable) needed to
+  connect the starting entity to the final answer variable.
+  A question of the form "X's A's B" or "the B of the A of X" describes TWO relationships (X->A,
+  then A->B), so the query needs TWO triples joined through an intermediate variable for A - it is
+  NOT correct to jump directly from X to B in a single triple, even if a single dbo: property exists
+  that sounds plausible for the combined relationship.
+  CORRECT (two-hop, "the country of the city where X is located"):
+    <X> dbo:location ?city . ?city dbo:country ?uri .
+  WRONG (collapses two relationships into one hop):
+    <X> dbo:country ?uri .
+  Apply the same logic for any chain length: count the relationship words/phrases in the question
+  (location, parent, source, related-to, composer-of, etc.) and use exactly that many triples with
+  intermediate variables connecting them in the same order the question describes.
+- TYPE FILTER:
+  If has_type_filter is TRUE: add rdf:type constraint using the matching Class from ontology results.
+  If has_type_filter is FALSE: do NOT add any rdf:type triple patterns AT ALL. This is critical.
+  NEVER add rdf:type triples when has_type_filter=false, even if domain/range suggests a type.
+  Example: has_type_filter=false + question about software -> do NOT add rdf:type dbo:Software
+  Example: has_type_filter=true + question about movies -> ADD rdf:type dbo:Film
 - DOMAIN/RANGE GUIDANCE: The ontology terms include domain and range metadata.
   Use domain to validate the subject type — if domain=Film and the variable is the subject, optionally add rdf:type dbo:Film.
   Use range to understand the return type — if range=nonNegativeInteger the result is a number not a URI.
@@ -107,7 +130,7 @@ Rules:
   Rule: the linked entity goes in the position (subject or object) that matches its type against domain/range.
 - ALWAYS use SELECT DISTINCT for queries that return resource URIs or literal values.
 - For boolean questions, use ASK WHERE { ... }.
-- For count questions, use SELECT DISTINCT COUNT(?var) WHERE { ... } (no AS alias).
+- For count questions, use SELECT (COUNT(DISTINCT ?var) AS ?count) WHERE { ... }.
 - For "top N" questions, use ORDER BY DESC(...) LIMIT N.
 - Use the EXACT entity URIs provided by the entity linking results. They may contain special
   Unicode characters (en dashes, accented letters, etc.) — preserve them exactly as given.
@@ -137,7 +160,7 @@ ASK WHERE {
 
 Example 4 — "How many unique authors have written science fiction novels?":
 ```sparql
-SELECT DISTINCT COUNT(?author) WHERE {
+SELECT (COUNT(DISTINCT ?author) AS ?count) WHERE {
   ?x <http://dbpedia.org/ontology/literaryGenre> <http://dbpedia.org/resource/Science_fiction> .
   ?x <http://dbpedia.org/ontology/author> ?author .
 }
@@ -153,9 +176,17 @@ SELECT ?country WHERE {
 
 Example 6 — "How many movies are directed by Christopher Nolan?" (rdf:type + COUNT):
 ```sparql
-SELECT DISTINCT COUNT(?uri) WHERE {
+SELECT (COUNT(DISTINCT ?uri) AS ?count) WHERE {
   ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Film> .
   ?uri <http://dbpedia.org/ontology/director> <http://dbpedia.org/resource/Christopher_Nolan> .
+}
+```
+
+Example 7 — "What is the population difference between Tokyo and Delhi?" (arithmetic expression):
+```sparql
+SELECT (?p1 - ?p2 AS ?difference) WHERE {
+  <http://dbpedia.org/resource/Tokyo> <http://dbpedia.org/ontology/populationTotal> ?p1 .
+  <http://dbpedia.org/resource/Delhi> <http://dbpedia.org/ontology/populationTotal> ?p2 .
 }
 ```
 """
