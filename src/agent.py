@@ -19,6 +19,9 @@ import dotenv
 from src.entity_linking import RedisEntityLinking
 from src.ontology_lookup import lookup_term, lookup_classes, lookup_properties
 from src import schema_introspector
+from src import sparql_client
+from src import query_executor as _query_executor
+from src import validator as _validator
 
 dotenv.load_dotenv(override=True)
 
@@ -425,14 +428,18 @@ class KGQAState(TypedDict):
     # Query Builder node output
     sparql:           str
 
-    # Query Executor node output
+    # Query Executor node output (modular -- see src/query_executor.py)
+    sparql_final:     str    # SPARQL that was actually executed
     exec_result:      dict
-    attempts:         int
-    swap_attempted:   bool
+    exec_attempts:    int    # total executor attempts across all tries
+    exec_fallback:    Optional[str]  # None | "dbo_to_dbp"
 
-    # Validator node output
-    is_valid:         bool
-    retry_target:     str   # "query_builder" | "entity_linker" | "end"
+    # Validator node output (see src/validator.py)
+    validator_action:    str    # "pass" | "retry_query_builder" | "give_up"
+    validator_reason:    str
+    validator_attempts:  int
+    probe_results:       dict   # {subject: {concept: [(uri, value)]}}
+    probe_context:       str    # formatted probe context for QB retry
 
 
 # ─── Standalone Node Functions ────────────────────────────────────────────────
@@ -566,122 +573,75 @@ def ontology_explorer_node(state: KGQAState) -> dict:
 def query_builder_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
     """Query Builder node: generate a SPARQL query from all available context.
 
+    On validator retries, probe_context is injected into the user message so
+    the LLM can use grounded live-probe evidence to correct its property choice.
     Corresponds to KGQAAgent._generate_sparql().
     Returns partial state update.
     """
     question        = state["question"]
     linked_entities = state["linked_entities"]
     ontology_terms  = state["ontology_terms"]
+    probe_context   = state.get("probe_context", "")
     model = model or state.get("model") or DEFAULT_MODEL
 
     # Reuse formatting helpers from KGQAAgent
     entity_context   = _format_entity_context(linked_entities)
     ontology_context = _format_ontology_context(ontology_terms)
 
+    user_content = (
+        f"Generate a SPARQL query for this question.\n\n"
+        f"Question: {question}\n\n"
+        f"Answer type: {state.get('answer_type', 'unknown')}\n"
+        f"Aggregator: {state.get('aggregator', 'NONE')}\n"
+        f"Join type: {state.get('join_type', 'SINGLE')}\n"
+        f"Has type filter: {state.get('has_type_filter', False)}\n\n"
+        f"Linked entities:\n{entity_context}\n"
+        f"Relevant ontology terms:\n{ontology_context}\n"
+    )
+    if probe_context:
+        user_content += probe_context + "\n"
+    user_content += "Output ONLY the SPARQL query."
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Generate a SPARQL query for this question.\n\n"
-                f"Question: {question}\n\n"
-                f"Answer type: {state.get('answer_type', 'unknown')}\n"
-                f"Aggregator: {state.get('aggregator', 'NONE')}\n"
-                f"Join type: {state.get('join_type', 'SINGLE')}\n"
-                f"Has type filter: {state.get('has_type_filter', False)}\n\n"
-                f"Linked entities:\n{entity_context}\n"
-                f"Relevant ontology terms:\n{ontology_context}\n"
-                f"Output ONLY the SPARQL query."
-            ),
-        },
+        {"role": "user",   "content": user_content},
     ]
     response = _chat(client, messages, model=model)
     sparql = _extract_sparql(response)
 
-    return {
-        "sparql":        sparql,
-        "attempts":      0,
-        "swap_attempted": False,
-    }
+    return {"sparql": sparql}
 
 
 def query_executor_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
-    """Query Executor node: execute the SPARQL query with deterministic dbo->dbp
-    fallback, then LLM revision if still failing.
+    """Query Executor node: execute SPARQL with one deterministic dbo->dbp fallback.
 
-    Corresponds to KGQAAgent._verify_and_revise().
+    Delegates entirely to src/query_executor.py. Recovery now happens in the Validator node via the
+    agentic probe + Query Builder retry loop.
     Returns partial state update.
     """
-    question        = state["question"]
-    sparql          = state["sparql"]
-    linked_entities = state["linked_entities"]
-    ontology_terms  = state["ontology_terms"]
-    attempts        = state.get("attempts", 0)
-    swap_attempted  = state.get("swap_attempted", False)
-    model = model or state.get("model") or DEFAULT_MODEL
+    sparql       = state["sparql"]
+    prev_attempts = state.get("exec_attempts", 0)
 
-    # Step 1: execute current sparql
-    exec_result = execute_sparql(sparql)
-    needs_fix, reason = _needs_revision(exec_result)
-
-    if not needs_fix:
-        return {
-            "exec_result":   exec_result,
-            "attempts":      attempts + 1,
-            "swap_attempted": swap_attempted,
-            "sparql":        sparql,
-        }
-
-    # Step 2: deterministic dbo->dbp swap (only once)
-    if not swap_attempted:
-        swapped = _swap_dbo_to_dbp(sparql)
-        if swapped != sparql:
-            logger.info("Retrying with dbo->dbp namespace swap...")
-            swap_result = execute_sparql(swapped)
-            swap_needs_fix, _ = _needs_revision(swap_result)
-            if not swap_needs_fix:
-                return {
-                    "exec_result":    swap_result,
-                    "sparql":         swapped,
-                    "attempts":       attempts + 1,
-                    "swap_attempted": True,
-                }
-            # Swap didn't help — continue with swapped query for LLM revision
-            sparql = swapped
-
-    # Step 3: LLM revision
-    entity_context   = _format_entity_context(linked_entities)
-    ontology_context = _format_ontology_context(ontology_terms)
-
-    if exec_result["type"] == "error":
-        exec_summary = f"Error: {exec_result['message']}"
-        problem = "a SPARQL error"
-    elif exec_result["type"] == "select" and exec_result["total"] == 0:
-        exec_summary = "The query executed successfully but returned 0 results."
-        problem = "0 results — the data is likely modelled differently than expected"
-    else:
-        exec_summary = json.dumps(exec_result, default=str)
-        problem = "unexpected results"
-
-    prompt = REVISION_PROMPT.format(
-        problem=problem,
-        question=question,
-        sparql=sparql,
-        exec_summary=exec_summary,
-        entity_context=entity_context,
-        ontology_context=ontology_context,
-    )
-    messages = [{"role": "user", "content": prompt}]
-    response = _chat(client, messages, model=model)
-    revised_sparql = _extract_sparql(response)
-    revised_result = execute_sparql(revised_sparql)
+    out = _query_executor.run(sparql)
 
     return {
-        "sparql":         revised_sparql,
-        "exec_result":    revised_result,
-        "attempts":       attempts + 1,
-        "swap_attempted": True,
+        "sparql_final":  out["sparql"],
+        "exec_result":   out["result"],
+        "exec_attempts": prev_attempts + out["attempts"],
+        "exec_fallback": out["fallback"],
     }
+
+
+def validator_node(state: KGQAState) -> dict:
+    """Validator node: inspect execution result and decide next action.
+
+    Delegates entirely to src/validator.py. Possible actions:
+      pass                -- result is good, route to END
+      retry_query_builder -- probe found data, route back to query_builder
+      give_up             -- max retries reached or no probe data, route to END
+    Returns partial state update.
+    """
+    return _validator.validate(state)
 
 
 # ─── Formatting helpers (module-level for use by both node functions and KGQAAgent) ───
@@ -1045,9 +1005,11 @@ class KGQAAgent:
         """
         if type(self) is KGQAAgent:
             logger.info(f"Processing question (graph): {question}")
-            graph = build_graph(redis_el=self.redis_el, model=model)
-            result = graph.invoke({"question": question, "model": model})
-            return result["sparql"]
+            graph  = build_graph(redis_el=self.redis_el, model=model)
+            result = graph.invoke({"question": question, "model": model,
+                                   "validator_attempts": 0, "exec_attempts": 0,
+                                   "probe_context": "", "probe_results": {}})
+            return result.get("sparql_final") or result.get("sparql", "")
         return self._answer_sequential(question, model=model)
 
     def answer_stream(self, question, model=None):
@@ -1117,9 +1079,11 @@ class KGQAAgent:
 def build_graph(redis_el=None, model: Optional[str] = None):
     """Build and compile the LangGraph StateGraph for the KGQA pipeline.
 
-    Wires all node functions into a linear StateGraph:
+    Wires all node functions into a StateGraph with a Validator loop:
       START -> planner -> entity_linker -> ontology_explorer
-             -> query_builder -> query_executor -> END
+             -> query_builder -> query_executor -> validator
+                              -> (pass / give_up) -> END
+                              -> (retry_query_builder) -> query_builder (loop)
 
     Node functions that require runtime dependencies (LLM client, Redis)
     are wrapped with functools.partial to bind those dependencies at
@@ -1135,10 +1099,8 @@ def build_graph(redis_el=None, model: Optional[str] = None):
     client = _get_llm_client()
 
     # Bind runtime dependencies to node functions via partial
-    bound_planner = functools.partial(planner_node, client=client, model=model)
-    bound_entity_linker = functools.partial(
-        entity_linker_node, redis_el=redis_el, client=client, model=model
-    )
+    bound_planner       = functools.partial(planner_node,       client=client, model=model)
+    bound_entity_linker = functools.partial(entity_linker_node, redis_el=redis_el, client=client, model=model)
     bound_query_builder = functools.partial(query_builder_node, client=client, model=model)
     bound_query_executor = functools.partial(query_executor_node, client=client, model=model)
 
@@ -1146,18 +1108,30 @@ def build_graph(redis_el=None, model: Optional[str] = None):
     graph = StateGraph(KGQAState)
 
     # Add nodes
-    graph.add_node("planner",          bound_planner)
-    graph.add_node("entity_linker",    bound_entity_linker)
+    graph.add_node("planner",           bound_planner)
+    graph.add_node("entity_linker",     bound_entity_linker)
     graph.add_node("ontology_explorer", ontology_explorer_node)
-    graph.add_node("query_builder",    bound_query_builder)
-    graph.add_node("query_executor",   bound_query_executor)
+    graph.add_node("query_builder",     bound_query_builder)
+    graph.add_node("query_executor",    bound_query_executor)
+    graph.add_node("validator",         validator_node)
 
-    # Add linear edges
+    # Linear edges: planner -> entity_linker -> ontology_explorer -> query_builder -> executor -> validator
     graph.set_entry_point("planner")
     graph.add_edge("planner",           "entity_linker")
     graph.add_edge("entity_linker",     "ontology_explorer")
     graph.add_edge("ontology_explorer", "query_builder")
     graph.add_edge("query_builder",     "query_executor")
-    graph.add_edge("query_executor",    END)
+    graph.add_edge("query_executor",    "validator")
+
+    # Conditional edge from Validator:
+    #   pass / give_up           -> END
+    #   retry_query_builder       -> query_builder (loop back with probe context)
+    def _route_validator(state: KGQAState) -> str:
+        action = state.get("validator_action", "give_up")
+        if action == "retry_query_builder":
+            return "query_builder"
+        return END
+
+    graph.add_conditional_edges("validator", _route_validator)
 
     return graph.compile()

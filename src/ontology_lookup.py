@@ -1,16 +1,25 @@
-#!/usr/bin/env python
-"""Ontology term lookup using Nomic Embed v1.5 and PyTorch cosine similarity.
+#!/usr/bin/env python3
+"""Ontology term lookup using a Nomic Embed v1.5 index over the curated dbo: ontology.
 
-Replaces the previous OpenAI + Gensim word2vec approach with a fully local,
-zero-API-cost semantic search over the precomputed Nomic embedding index.
+dbo: only -- pure cosine similarity over the pre-built dbo index.
 
-The index is built once by running:
-    pipenv run python scripts/build_ontology_index.py
+dbp: properties are NOT statically embedded or pre-ranked. They only ever
+enter the pipeline via two mechanisms, both of which work against live data:
+  1. The deterministic class-safe dbo->dbp namespace swap in query_executor.py
+  2. The live agentic probe in validator.py, which queries the SPARQL endpoint
+     directly to find which dbp: properties have data for a given subject.
 
-Index files (these will be created by running the build script):
-    data/nomic_embeddings.pt   — PyTorch tensor [N, 768]
-    data/nomic_uris.json       — list of N URIs
-    data/nomic_labels.json     — list of N labels
+This is a deliberate simplification from an earlier two-index approach
+that also embedded ~49k dbp: properties with AI-generated labels. That approach
+was dropped because: (a) AI-labelling at that scale is not scientifically
+defensible, and (b) a controlled before/after comparison on the
+DB26 benchmark showed the two approaches were statistically indistinguishable
+once timeout noise and a swap bug were fixed. 
+
+Index files (built by scripts/build_ontology_index.py):
+    data/nomic_embeddings_dbo.pt  -- PyTorch tensor [N, 768]
+    data/nomic_uris_dbo.json      -- list of N URIs
+    data/nomic_labels_dbo.json    -- list of N labels
 """
 
 import json
@@ -19,106 +28,77 @@ from pathlib import Path
 import torch
 from sentence_transformers import SentenceTransformer, util
 
-# ─── Index paths ──────────────────────────────────────────────────────────────
+_DATA_DIR      = Path(__file__).parent.parent / "data"
+_EMBEDDINGS    = _DATA_DIR / "nomic_embeddings_dbo.pt"
+_URIS          = _DATA_DIR / "nomic_uris_dbo.json"
+_LABELS        = _DATA_DIR / "nomic_labels_dbo.json"
 
-_DATA_DIR = Path(__file__).parent.parent / "data"
-_EMBEDDINGS_PATH = _DATA_DIR / "nomic_embeddings.pt"
-_URIS_PATH       = _DATA_DIR / "nomic_uris.json"
-_LABELS_PATH     = _DATA_DIR / "nomic_labels.json"
-
-# ─── Singletons ───────────────────────────────────────────────────────────────
-
-_nomic_model = None
-_embeddings  = None
-_uris        = None
-_labels      = None
+_nomic_model   = None
+_embeddings    = None
+_uris          = None
+_labels        = None
 
 
 def _load_index():
-    """Lazy-load the Nomic index into memory (runs once per process)."""
     global _nomic_model, _embeddings, _uris, _labels
     if _embeddings is not None:
         return
 
-    if not _EMBEDDINGS_PATH.exists():
+    if not _EMBEDDINGS.exists():
         raise FileNotFoundError(
-            f"Nomic index not found at {_EMBEDDINGS_PATH}.\n"
+            f"dbo index not found at {_EMBEDDINGS}.\n"
             "Run: pipenv run python scripts/build_ontology_index.py"
         )
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device       = "cuda" if torch.cuda.is_available() else "cpu"
     _nomic_model = SentenceTransformer(
         "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True, device=device
     )
-    _embeddings = torch.load(str(_EMBEDDINGS_PATH), map_location=device)
-    with open(_URIS_PATH) as f:
+    _embeddings  = torch.load(str(_EMBEDDINGS), map_location=device, weights_only=True)
+    with open(_URIS) as f:
         _uris = json.load(f)
-    with open(_LABELS_PATH) as f:
+    with open(_LABELS) as f:
         _labels = json.load(f)
 
 
-# ─── Semantic lookup ───────────────────────────────────────────────────────────────
+def lookup_term(term, k=15):
+    """Return top-k dbo: candidates for a concept, ranked by cosine similarity.
 
-def lookup_term(term, k=10, classes=True, properties=True):
-    """Look up an ontology term by natural language description.
+    k=15 (widened from the earlier default of 10) to give the Query Builder a
+    deeper dbo: pool to choose from on the first attempt, compensating for the
+    removal of the static dbp: index.
 
-    Returns top-k semantically similar entries from the Nomic index.
-
-    Args:
-        term:       Natural language concept (e.g. "director", "birthplace")
-        k:          Number of results to return (default 10)
-        classes:    Include OWL Classes in results (default True)
-        properties: Include OWL Properties in results (default True)
-
-    Returns:
-        List of dicts with keys: uri, label, score, confidence_pct, source
-        - uri:            Full DBpedia URI
-        - label:          Human-readable label
-        - score:          Raw cosine similarity in [-1, 1]
-        - confidence_pct: Normalised confidence ((cosine+1)/2)*100
-        - source:         Always "nomic"
+    Returns list of dicts: {uri, label, score, confidence_pct, source}
     """
     _load_index()
-
-    query_text = f"search_query: {term}"
-    query_embedding = _nomic_model.encode(query_text, convert_to_tensor=True)
-    cos_scores = util.cos_sim(query_embedding, _embeddings)
+    query_embedding = _nomic_model.encode(
+        f"search_query: {term}", convert_to_tensor=True
+    )
+    cos_scores  = util.cos_sim(query_embedding, _embeddings)
     top_results = torch.topk(cos_scores, k=min(k * 3, len(_uris)))
 
     results = []
     for score_t, idx_t in zip(top_results.values[0], top_results.indices[0]):
-        uri = _uris[idx_t.item()]
-        label = _labels[idx_t.item()]
-
-        # Filter by type if requested
-        is_class = label and label[0].isupper() and "ontology" in uri
-        if is_class and not classes:
-            continue
-        if not is_class and not properties:
-            continue
-
-        raw_cosine = score_t.item()
+        raw_cosine     = score_t.item()
         confidence_pct = ((raw_cosine + 1) / 2) * 100
-
+        idx            = idx_t.item()
         results.append({
-            "uri": uri,
-            "label": label,
-            "score": round(raw_cosine, 4),
+            "uri":            _uris[idx],
+            "label":          _labels[idx],
+            "score":          round(raw_cosine, 4),
             "confidence_pct": round(confidence_pct, 1),
-            "source": "nomic",
+            "source":         "dbo",
         })
-
         if len(results) >= k:
             break
-
     return results
 
 
-def lookup_classes(term, k=10):
+def lookup_classes(term, k=15):
     """Look up only ontology Classes (for rdf:type constraints)."""
-    return lookup_term(term, k=k, classes=True, properties=False)
+    return [r for r in lookup_term(term, k=k) if r["uri"].split("/")[-1][0].isupper()]
 
 
-def lookup_properties(term, k=10):
+def lookup_properties(term, k=15):
     """Look up only ontology properties (for predicates)."""
-    return lookup_term(term, k=k, classes=False, properties=True)
+    return [r for r in lookup_term(term, k=k) if not r["uri"].split("/")[-1][0].isupper()]
