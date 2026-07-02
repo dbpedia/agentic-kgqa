@@ -27,7 +27,7 @@ dotenv.load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
-DBPEDIA_SPARQL_ENDPOINT = "http://localhost:7878/query"
+DBPEDIA_SPARQL_ENDPOINT = "http://research.liberai.org:7878/sparql"
 
 PROMPT_VERSION = "v9"
 
@@ -202,7 +202,7 @@ def _get_llm_client():
     )
 
 
-DEFAULT_MODEL = "google/gemini-2.0-flash-001"
+DEFAULT_MODEL = "qwen/qwen3.5-122b-a10b"
 
 MODELS = [
     {"id": "google/gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
