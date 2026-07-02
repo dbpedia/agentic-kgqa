@@ -94,9 +94,18 @@ def _probe_dbpedia(subjects: list, concepts: list) -> dict:
     for subject in subjects:
         subject_found = {}
         for concept in concepts:
+            print(f"  [VALIDATOR:PROBE] subject={subject.split('/')[-1]} concept='{concept}'")
             props = _probe_keyword(subject, concept)
-            if not props:
+            if props:
+                for p, o in props:
+                    print(f"  [VALIDATOR:PROBE]   found {p.split('/')[-1]} = {str(o)[:40]}")
+            else:
+                print(f"  [VALIDATOR:PROBE]   keyword probe found nothing, trying unfiltered fallback...")
                 props = _probe_unfiltered(subject)
+                if props:
+                    print(f"  [VALIDATOR:PROBE]   unfiltered probe found {len(props)} properties")
+                else:
+                    print(f"  [VALIDATOR:PROBE]   unfiltered probe also found nothing")
             if props:
                 subject_found[concept] = props
         if subject_found:
@@ -152,6 +161,7 @@ def validate(state: dict) -> dict:
 
     # Rule 1: result is good
     if not fix:
+        print(f"[VALIDATOR] Result is good ({_summarise(result)}). Action: PASS")
         return {**state,
                 "validator_action":   "pass",
                 "validator_reason":   f"good result: {_summarise(result)}",
@@ -160,6 +170,7 @@ def validate(state: dict) -> dict:
 
     # Rule 2: max retries reached
     if validator_attempts >= MAX_VALIDATOR_RETRIES:
+        print(f"[VALIDATOR] Max retries ({MAX_VALIDATOR_RETRIES}) reached. Action: GIVE_UP")
         return {**state,
                 "validator_action":   "give_up",
                 "validator_reason":   f"max retries reached after {validator_attempts} attempts",
@@ -170,6 +181,7 @@ def validate(state: dict) -> dict:
     if result.get("type") == "error":
         msg = result.get("message", "").lower()
         if any(k in msg for k in ["timeout", "connection", "refused", "urlopen"]):
+            print(f"[VALIDATOR] Endpoint unavailable. Action: GIVE_UP")
             return {**state,
                     "validator_action":   "give_up",
                     "validator_reason":   f"endpoint error: {result.get('message','')[:80]}",
@@ -177,8 +189,11 @@ def validate(state: dict) -> dict:
                     "validator_attempts": validator_attempts}
 
     # Rule 4: run agentic probe and retry Query Builder
+    print(f"[VALIDATOR] Result needs fix ({reason}). Running agentic probe...")
     subjects = _extract_subjects(sparql)
+
     if not subjects:
+        print(f"[VALIDATOR] No subjects found in SPARQL. Action: GIVE_UP")
         return {**state,
                 "validator_action":   "give_up",
                 "validator_reason":   "no DBpedia resource URIs found in SPARQL to probe",
@@ -188,6 +203,7 @@ def validate(state: dict) -> dict:
     probe_results = _probe_dbpedia(subjects, concepts)
 
     if not probe_results:
+        print(f"[VALIDATOR] Probe found nothing. Action: GIVE_UP")
         return {**state,
                 "validator_action":   "give_up",
                 "validator_reason":   "agentic probe found no matching dbp: properties",
@@ -195,6 +211,8 @@ def validate(state: dict) -> dict:
                 "validator_attempts": validator_attempts + 1}
 
     probe_context = _format_probe_context(probe_results)
+    n_subjects = len(probe_results)
+    print(f"[VALIDATOR] Probe found properties for {n_subjects} subject(s). Action: RETRY_QUERY_BUILDER")
 
     return {**state,
             "validator_action":   "retry_query_builder",

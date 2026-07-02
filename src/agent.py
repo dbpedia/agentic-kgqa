@@ -63,19 +63,32 @@ Rules:
   WRONG:   dbr:Keanu_Reeves
 - Common URI bases:
   Resources: <http://dbpedia.org/resource/...>
-  Ontology:  <http://dbpedia.org/ontology/...> (dbo — curated ontology, ALWAYS preferred)
-  Property:  <http://dbpedia.org/property/...> (dbp — raw infobox, use ONLY when no dbo: equivalent exists)
+  Ontology:  <http://dbpedia.org/ontology/...> (dbo - curated ontology, ALWAYS use this on the first attempt)
+  Property:  <http://dbpedia.org/property/...> (dbp - raw infobox; NEVER use this on a first attempt,
+             only when the LIVE PROBE OVERRIDE rule below explicitly instructs you to)
   RDF type:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
 - PROPERTY SELECTION:
-  The ontology lookup results show ranked candidates with confidence scores.
-  ALWAYS reason over all candidates before choosing — consider the question wording and each candidate's label.
-  The top-ranked candidate (highest score) has strong semantic similarity to the concept — give it extra weight.
-  Only choose a lower-ranked candidate if its label is a significantly better match for the specific wording of the question.
-  Example: for concept 'author', top-1 is dbo:author (88%) and dbo:writer (81%) also appears. The question says 'written' but dbo:author is the canonical DBpedia property — prefer dbo:author unless the question specifically says 'writer'.
-  Example: for concept 'country', if the question says 'where does X START' or 'source of X', prefer dbo:sourceCountry over dbo:country even if dbo:country ranks higher — the question's 'start/source' word signals a more specific predicate.
-  ALWAYS use the dbo: (ontology) variant when one exists, regardless of scores.
-  Use dbp: ONLY when the results show no dbo: equivalent for that concept.
-  Do NOT invent property names — use URIs from the ontology lookup results provided to you.
+  The ontology lookup results show dbo: candidates per concept (the curated DBpedia ontology index --
+  there is no separate dbp: index; dbp: properties are not pre-ranked or pre-selected anywhere).
+  Each dbo: candidate shows: URI | label | domain | range | confidence score.
+  ALWAYS reason over all dbo: candidates before choosing - consider the question wording and each
+  candidate's label, not just the top-ranked one.
+  The top-ranked candidate (highest score) has strong semantic similarity to the concept - give it
+  extra weight, but a lower-ranked candidate may still be correct if its label is a clearly better
+  match for the specific real-world relationship the question describes.
+  FIRST ATTEMPT RULE: on the first attempt for any concept, ALWAYS generate the query using a dbo:
+  property from the candidates shown. Never guess or invent a dbp: property name on a first attempt --
+  dbp: properties are only ever introduced later via the live probe described below, where they come
+  with confirmed real data rather than a guess.
+  Do NOT invent property names - only use URIs from the ontology lookup results provided to you.
+  LIVE PROBE OVERRIDE (CRITICAL - applies whenever "ACTUAL DBpedia properties found via live probe"
+  appears below): this means the dbo: property you previously chose was ALREADY TRIED (directly, or via
+  an automatic dbo:->dbp: namespace swap) and returned ZERO results against the live endpoint - it does
+  NOT actually have data for this subject. In that case you MUST use the dbp: property shown in the live
+  probe section instead. The live probe is real-time confirmed evidence of what data actually exists for
+  this exact entity - it always overrides any prior dbo: guess, because a property with no data is
+  useless regardless of how well it matched semantically. Do not repeat the same dbo: property, or the
+  same dbp: property, that previously returned zero results on an earlier attempt for this question.
 - AGGREGATION: Use the aggregator field from the analysis:
   COUNT -> SELECT (COUNT(DISTINCT ?var) AS ?count) WHERE  <-- ALWAYS use this exact syntax for counts
   SUM -> SELECT (SUM(?var) AS ?total) WHERE
@@ -146,13 +159,16 @@ SELECT DISTINCT ?uri WHERE {
 }
 ```
 
-Example 2 — "Who are the managers of LeBron James's teams?" (no dbo: equivalent for these properties):
+Example 2 - "What is the number of Starbucks locations worldwide?" (first attempt uses dbo:, fails,
+retry uses dbp: because the live probe confirmed it has the data):
 ```sparql
 SELECT DISTINCT ?uri WHERE {
-  <http://dbpedia.org/resource/LeBron_James> <http://dbpedia.org/property/team> ?team .
-  ?team <http://dbpedia.org/property/manager> ?uri .
+  <http://dbpedia.org/resource/Starbucks> <http://dbpedia.org/property/numLocations> ?uri .
 }
 ```
+(The first attempt tried <http://dbpedia.org/ontology/numberOfLocations>, which returned zero
+results. The live probe then showed dbp:numLocations actually has a value for Starbucks, so the
+retry uses that dbp: property instead, per the LIVE PROBE OVERRIDE rule above.)
 
 Example 3 — "Is the Eiffel Tower in Paris?":
 ```sparql
@@ -234,15 +250,19 @@ Pick the number of the most appropriate candidate.
 Reply with ONLY the number (1, 2, 3, etc.) and nothing else."""
 
 
-def _chat(client, messages, model=None):
+def _chat(client, messages, model=None, max_tokens=None):
     model = model or DEFAULT_MODEL
     response = client.chat.completions.create(
-        model=model, messages=messages, temperature=0, max_tokens=MAX_OUTPUT_TOKENS
+        model=model, messages=messages, temperature=0,
+        max_tokens=max_tokens or MAX_OUTPUT_TOKENS
     )
-    return response.choices[0].message.content
+    content = response.choices[0].message.content
+    if content is None:
+        raise ValueError(f"LLM returned None content (model={model})")
+    return content
 
 
-def execute_sparql(sparql, endpoint=None, timeout=15):
+def execute_sparql(sparql, endpoint=None, timeout=40):
     """Execute a SPARQL query against a public endpoint. Returns parsed JSON results or error string."""
     endpoint = endpoint or DBPEDIA_SPARQL_ENDPOINT
     params = urllib.parse.urlencode({"query": sparql, "format": "application/sparql-results+json"})
@@ -273,6 +293,8 @@ def execute_sparql(sparql, endpoint=None, timeout=15):
 
 def _extract_json(text):
     """Extract JSON object from LLM response text."""
+    if not text:
+        raise ValueError("LLM returned empty response")
     match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
     if match:
         return json.loads(match.group(1))
@@ -457,6 +479,9 @@ def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
     question = state["question"]
     model = model or state.get("model") or DEFAULT_MODEL
 
+    print(f"\n{'='*60}")
+    print(f"[PLANNER] Question: {question}")
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -489,8 +514,11 @@ def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
             ),
         },
     ]
-    response = _chat(client, messages, model=model)
+    response = _chat(client, messages, model=model, max_tokens=1024)
     analysis = _extract_json(response)
+
+    print(f"[PLANNER] entities={analysis.get('entities')} concepts={analysis.get('concepts')}")
+    print(f"[PLANNER] aggregator={analysis.get('aggregator')} join={analysis.get('join_type')} type_filter={analysis.get('has_type_filter')}")
 
     return {
         "entities":        analysis.get("entities", []),
@@ -529,6 +557,8 @@ def entity_linker_node(state: KGQAState, redis_el, client, model: Optional[str] 
     model = model or state.get("model") or DEFAULT_MODEL
     linked = {}
 
+    print(f"\n[ENTITY LINKER] Linking {len(entities)} entities...")
+
     for entity in entities:
         if redis_el is None:
             uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
@@ -547,9 +577,11 @@ def entity_linker_node(state: KGQAState, redis_el, client, model: Optional[str] 
             if question and len(entries) > 1:
                 entries = _disambiguate(client, question, entity, entries, model=model)
             linked[entity] = entries
+            print(f"[ENTITY LINKER]   {entity} -> {entries[0]['uri']} (score={entries[0]['score']})")
         else:
             uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
             linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
+            print(f"[ENTITY LINKER]   {entity} -> {uri} (heuristic, redis miss)")
 
     return {"linked_entities": linked}
 
@@ -563,10 +595,16 @@ def ontology_explorer_node(state: KGQAState) -> dict:
     """
     concepts = state["concepts"]
     ontology = {}
+
+    print(f"\n[ONTOLOGY EXPLORER] Looking up {len(concepts)} concepts...")
+
     for concept in concepts:
         results = lookup_term(concept)
         results = schema_introspector.enrich(results)
         ontology[concept] = results
+        names = [r["uri"].split("/")[-1] for r in results]
+        print(f"[ONTOLOGY EXPLORER]   '{concept}' -> dbo:{names}")
+
     return {"ontology_terms": ontology}
 
 
@@ -583,6 +621,12 @@ def query_builder_node(state: KGQAState, client, model: Optional[str] = None) ->
     ontology_terms  = state["ontology_terms"]
     probe_context   = state.get("probe_context", "")
     model = model or state.get("model") or DEFAULT_MODEL
+
+    validator_attempts = state.get("validator_attempts", 0)
+    if validator_attempts > 0:
+        print(f"\n[QUERY BUILDER] Retry #{validator_attempts} with probe context...")
+    else:
+        print(f"\n[QUERY BUILDER] Generating SPARQL...")
 
     # Reuse formatting helpers from KGQAAgent
     entity_context   = _format_entity_context(linked_entities)
@@ -608,6 +652,8 @@ def query_builder_node(state: KGQAState, client, model: Optional[str] = None) ->
     ]
     response = _chat(client, messages, model=model)
     sparql = _extract_sparql(response)
+
+    print(f"[QUERY BUILDER] Generated:\n{sparql[:200]}...")
 
     return {"sparql": sparql}
 
@@ -641,6 +687,7 @@ def validator_node(state: KGQAState) -> dict:
       give_up             -- max retries reached or no probe data, route to END
     Returns partial state update.
     """
+    print(f"\n[VALIDATOR] Checking result...")
     return _validator.validate(state)
 
 
@@ -1129,7 +1176,9 @@ def build_graph(redis_el=None, model: Optional[str] = None):
     def _route_validator(state: KGQAState) -> str:
         action = state.get("validator_action", "give_up")
         if action == "retry_query_builder":
+            print(f"[ROUTER] Routing back to Query Builder for retry")
             return "query_builder"
+        print(f"[ROUTER] Action={action}, routing to END")
         return END
 
     graph.add_conditional_edges("validator", _route_validator)

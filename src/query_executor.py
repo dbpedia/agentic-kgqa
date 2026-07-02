@@ -38,6 +38,16 @@ def _swap_dbo_to_dbp(sparql: str) -> str:
     return _ONTOLOGY_URI_RE.sub(_maybe_swap, sparql)
 
 
+def _summarise(result: dict) -> str:
+    if result["type"] == "ask":
+        return f"ASK={result['result']}"
+    if result["type"] == "select":
+        return f"SELECT {result['total']} rows"
+    if result["type"] == "error":
+        return f"ERROR: {result['message'][:60]}"
+    return result["type"]
+
+
 def run(sparql: str) -> dict:
     """Execute SPARQL with one deterministic dbo->dbp fallback.
 
@@ -49,23 +59,27 @@ def run(sparql: str) -> dict:
             "fallback":  None | "dbo_to_dbp",
         }
     """
+    print(f"\n[EXECUTOR] Executing initial query...")
     result      = execute(sparql)
     fix, reason = needs_fix(result)
 
     if not fix:
+        print(f"[EXECUTOR] Result: {_summarise(result)} -- PASS")
         return {"sparql": sparql, "result": result, "attempts": 1, "fallback": None}
 
+    print(f"[EXECUTOR] Failed ({reason}). Trying dbo->dbp swap...")
     swapped = _swap_dbo_to_dbp(sparql)
 
     if swapped == sparql:
-        # No dbo: URIs to swap -- return original failure for Validator to handle
+        print(f"[EXECUTOR] No dbo: URIs found to swap. Returning original failure.")
         return {"sparql": sparql, "result": result, "attempts": 1, "fallback": None}
 
-    swap_result     = execute(swapped)
-    fix2, _         = needs_fix(swap_result)
+    swap_result = execute(swapped)
+    fix2, reason2 = needs_fix(swap_result)
 
     if not fix2:
+        print(f"[EXECUTOR] dbo->dbp swap succeeded: {_summarise(swap_result)}")
         return {"sparql": swapped, "result": swap_result, "attempts": 2, "fallback": "dbo_to_dbp"}
 
-    # Swap didn't help -- pass the swapped query + its result to Validator
+    print(f"[EXECUTOR] dbo->dbp swap also failed ({reason2}). Passing to Validator.")
     return {"sparql": swapped, "result": swap_result, "attempts": 2, "fallback": "dbo_to_dbp"}

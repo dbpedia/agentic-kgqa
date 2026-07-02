@@ -311,6 +311,17 @@ def evaluate_pipeline(
             val_attempts     = state.get("validator_attempts", 0)
             val_action       = state.get("validator_action", "")
             val_reason       = state.get("validator_reason", "")
+
+            print(f"\n{'='*60}")
+            print(f"[PIPELINE COMPLETE]")
+            print(f"  Question:  {question}")
+            print(f"  SPARQL:    {generated_sparql[:120]}")
+            print(f"  Result:    {state.get('exec_result', {})}")
+            print(f"  Executor attempts: {exec_attempts}")
+            print(f"  Validator attempts: {val_attempts}")
+            print(f"  Validator action: {val_action}")
+            print(f"  Validator reason: {val_reason}")
+            print(f"{'='*60}")
         except Exception as e:
             print(f"  ERROR in pipeline: {e}")
             results.append({
