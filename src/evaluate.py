@@ -33,6 +33,7 @@ BENCHMARK_DB26 = _REPO_ROOT / "benchmark" / "questions_db26.yml"
 DATA_DIR       = _REPO_ROOT / "data"
 EVALS_DIR      = DATA_DIR / "evals"
 GOLD_CACHE_DB26 = DATA_DIR / "db26_gold_final.json"
+GOLD_CACHE_DB25 = DATA_DIR / "db25_gold_final.json"
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 JUDGE_MODEL = "anthropic/claude-sonnet-4.6"
@@ -40,6 +41,7 @@ ENDPOINT    = "http://research.liberai.org:7878/sparql"
 
 # ─── Gold cache ───────────────────────────────────────────────────────────────
 _gold_cache_db26 = None
+_gold_cache_db25 = None
 
 
 def _load_gold_cache_db26() -> dict:
@@ -62,6 +64,28 @@ def _load_gold_cache_db26() -> dict:
         data = json.load(f)
     _gold_cache_db26 = {q["id"]: q["gold_result"] for q in data.get("questions", [])}
     return _gold_cache_db26
+
+
+def _load_gold_cache_db25() -> dict:
+    """Load pre-computed DB25 gold results from data/db25_gold_final.json.
+
+    Returns {question_id: gold_result_dict}. Falls back to live execution
+    per question if the cache file does not exist -- nothing breaks, but
+    gold-side timing variance is reintroduced between runs. Build the cache
+    by running: pipenv run python scripts/build_db25_gold.py
+    """
+    global _gold_cache_db25
+    if _gold_cache_db25 is not None:
+        return _gold_cache_db25
+    if not GOLD_CACHE_DB25.exists():
+        print(f"[WARN] Gold cache not found at {GOLD_CACHE_DB25}. "
+              f"Run scripts/build_db25_gold.py to build it.")
+        _gold_cache_db25 = {}
+        return _gold_cache_db25
+    with open(GOLD_CACHE_DB25) as f:
+        data = json.load(f)
+    _gold_cache_db25 = {q["id"]: q["gold_result"] for q in data.get("questions", [])}
+    return _gold_cache_db25
 
 
 # ─── LLM client ───────────────────────────────────────────────────────────────
@@ -362,6 +386,9 @@ def evaluate_pipeline(
         # Gold side: use pre-computed cache for db26, live execution for db25
         if benchmark == "db26":
             gold_cache = _load_gold_cache_db26()
+            exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
+        elif benchmark == "db25":
+            gold_cache = _load_gold_cache_db25()
             exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
         else:
             exp_result = _execute_sparql(expected_sparql)
