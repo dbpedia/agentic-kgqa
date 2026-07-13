@@ -131,8 +131,8 @@ Evaluated on the Text2SPARQL 2026 DB26 benchmark (50 questions) using the dbo-on
 | Model | Result-set match | Avg F1 |
 |---|---|---|
 | Claude Sonnet 4.6 | 24/50 (48%) | 0.55 |
+| Qwen 3.5 122B | 21/50 (42%) | 0.45 |
 | DeepSeek v3.2 | 18/50 (36%) | 0.41 |
-| Qwen 3.5 122B | TBD | TBD |
 | LIBER-AI-CLAUDE (baseline) | — | 0.32 |
 
 Evaluated on Text2SPARQL 2025 DB25 benchmark (100 questions):
