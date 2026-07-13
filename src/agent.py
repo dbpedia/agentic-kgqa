@@ -252,14 +252,16 @@ Reply with ONLY the number (1, 2, 3, etc.) and nothing else."""
 
 def _chat(client, messages, model=None, max_tokens=None):
     model = model or DEFAULT_MODEL
-    response = client.chat.completions.create(
-        model=model, messages=messages, temperature=0,
-        max_tokens=max_tokens or MAX_OUTPUT_TOKENS
-    )
-    content = response.choices[0].message.content
-    if content is None:
-        raise ValueError(f"LLM returned None content (model={model})")
-    return content
+    for attempt in range(3):
+        response = client.chat.completions.create(
+            model=model, messages=messages, temperature=0,
+            max_tokens=max_tokens or MAX_OUTPUT_TOKENS
+        )
+        content = response.choices[0].message.content
+        if content is not None:
+            return content
+        print(f"[LLM] Response was None, retrying (attempt {attempt+1}/3)...")
+    raise ValueError(f"LLM returned None content after 3 attempts (model={model})")
 
 
 def execute_sparql(sparql, endpoint=None, timeout=40):
@@ -758,13 +760,17 @@ def _disambiguate(client, question: str, mention: str, candidates: list, model: 
         candidates=candidate_list,
     )
     try:
-        response = client.chat.completions.create(
-            model=model or DEFAULT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=10,
-        )
-        answer = response.choices[0].message.content
+        for dis_attempt in range(3):
+            response = client.chat.completions.create(
+                model=model or DEFAULT_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=10,
+            )
+            answer = response.choices[0].message.content
+            if answer is not None:
+                break
+            print(f"[LLM] Disambiguation response was None, retrying (attempt {dis_attempt+1}/3)...")
         if answer is None:
             return candidates
         idx = int(answer.strip()) - 1
@@ -873,13 +879,17 @@ class KGQAAgent:
             candidates=candidate_list,
         )
         try:
-            response = self.client.chat.completions.create(
-                model=model or DEFAULT_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=10,
-            )
-            answer = response.choices[0].message.content
+            for dis_attempt in range(3):
+                response = self.client.chat.completions.create(
+                    model=model or DEFAULT_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                    max_tokens=10,
+                )
+                answer = response.choices[0].message.content
+                if answer is not None:
+                    break
+                print(f"[LLM] Disambiguation response was None, retrying (attempt {dis_attempt+1}/3)...")
             if answer is None:
                 return candidates
             idx = int(answer.strip()) - 1
