@@ -148,6 +148,25 @@ def _extract_subjects(sparql: str) -> list:
     return result
 
 
+def _strip_disambiguation_suffix(uri: str):
+    """Strip disambiguation suffix from a DBpedia resource URI.
+
+    If the URI contains '_(' (e.g. Oddworld_(series), Back_to_Black_(album)),
+    this is a DBpedia disambiguation pattern. The bare title without the suffix
+    is often the canonical resource that actually holds the data.
+
+    Returns the cleaned URI string if a suffix was found, None otherwise.
+    """
+    if "/resource/" not in uri:
+        return None
+    prefix, resource = uri.split("/resource/", 1)
+    idx = resource.find("_(")
+    if idx == -1:
+        return None
+    cleaned = resource[:idx]
+    return f"{prefix}/resource/{cleaned}"
+
+
 # ─── Main validate function ────────────────────────────────────────────────────
 
 def validate(state: dict) -> dict:
@@ -203,6 +222,35 @@ def validate(state: dict) -> dict:
     probe_results = _probe_dbpedia(subjects, concepts)
 
     if not probe_results:
+        # Rule 4.5: dead URI detection
+        # If ALL subjects returned zero properties from the unfiltered probe,
+        # the URI itself is likely wrong (dead resource). Check for DBpedia
+        # disambiguation suffixes like _(series), _(film), _(band) etc.
+        # If found, strip the suffix and retry with the cleaned URI.
+        cleaned_entities = {}
+        for subject in subjects:
+            cleaned = _strip_disambiguation_suffix(subject)
+            if cleaned:
+                print(f"[VALIDATOR] Dead URI detected: {subject.split('/')[-1]}")
+                print(f"[VALIDATOR] Stripped suffix -> {cleaned.split('/')[-1]}")
+                linked = state.get("linked_entities", {})
+                for mention, candidates in linked.items():
+                    if candidates and candidates[0]["uri"] == subject:
+                        cleaned_entities[mention] = [
+                            {"uri": cleaned, "score": 1.0, "source": "validator_cleaned"}
+                        ] + candidates[1:]
+
+        if cleaned_entities:
+            updated_linked = {**state.get("linked_entities", {}), **cleaned_entities}
+            print(f"[VALIDATOR] Retrying with cleaned entity URIs. Action: RETRY_QUERY_BUILDER")
+            return {**state,
+                    "linked_entities":   updated_linked,
+                    "probe_context":      "",
+                    "probe_results":      {},
+                    "validator_action":   "retry_query_builder",
+                    "validator_reason":   "dead URI detected and stripped disambiguation suffix",
+                    "validator_attempts": validator_attempts + 1}
+
         print(f"[VALIDATOR] Probe found nothing. Action: GIVE_UP")
         return {**state,
                 "validator_action":   "give_up",
