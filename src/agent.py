@@ -107,17 +107,21 @@ Rules:
 - HOP COUNT: Count how many distinct relationships the question describes in its chain, and match
   that exactly with the number of triples (each introducing one new intermediate variable) needed to
   connect the starting entity to the final answer variable.
-  A question of the form "X's A's B" or "the B of the A of X" describes TWO relationships (X->A,
-  then A->B), so the query needs TWO triples joined through an intermediate variable for A - it is
-  NOT correct to jump directly from X to B in a single triple, even if a single dbo: property exists
-  that sounds plausible for the combined relationship.
-  CORRECT (two-hop, "the country of the city where X is located"):
-    <X> dbo:location ?city . ?city dbo:country ?uri .
-  WRONG (collapses two relationships into one hop):
-    <X> dbo:country ?uri .
-  Apply the same logic for any chain length: count the relationship words/phrases in the question
-  (location, parent, source, related-to, composer-of, etc.) and use exactly that many triples with
-  intermediate variables connecting them in the same order the question describes.
+  The Planner has already computed num_hops for this question. Use it as a hard constraint:
+  num_hops=1: generate EXACTLY ONE triple connecting the entity directly to the answer variable.
+              Do NOT add intermediate variables unless the probe context explicitly requires it.
+  num_hops=2: generate EXACTLY TWO triples connected by ONE intermediate variable.
+              Pattern: <entity> predA ?intermediate . ?intermediate predB ?answer
+              NEVER collapse this into one triple even if a single predicate sounds plausible.
+  num_hops=3: generate THREE triples with TWO intermediate variables chained together.
+  CORRECT (num_hops=2, "land size of country where Oxford is located"):
+    <Oxford> dbo:country ?country . ?country dbo:areaTotal ?area .
+  WRONG (collapses to 1 hop):
+    <Oxford> dbo:areaTotal ?area .
+  CORRECT (num_hops=2, "motto of unit Stewart Bovell served in"):
+    <Stewart_Bovell> dbo:militaryBranch ?unit . ?unit dbp:motto ?motto .
+  WRONG (collapses to 1 hop):
+    <Stewart_Bovell> dbp:motto ?motto .
 - TYPE FILTER:
   If has_type_filter is TRUE: add rdf:type constraint using the matching Class from ontology results.
   If has_type_filter is FALSE: do NOT add any rdf:type triple patterns AT ALL. This is critical.
@@ -464,6 +468,7 @@ class KGQAState(TypedDict):
     validator_attempts:  int
     probe_results:       dict   # {subject: {concept: [(uri, value)]}}
     probe_context:       str    # formatted probe context for QB retry
+    num_hops:            int    # number of relationship hops (1=single, 2+=multi-hop)
 
 
 # ─── Standalone Node Functions ────────────────────────────────────────────────
@@ -506,13 +511,22 @@ def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
                 f"UNION = question asks about either entity using 'or', "
                 f"SINGLE = normal single-entity question)\n"
                 f"- has_type_filter: true if the question explicitly asks for a category "
-                f"like 'which movies', 'list countries', 'how many companies' etc, false otherwise\n\n"
+                f"like 'which movies', 'list countries', 'how many companies' etc, false otherwise\n"
+                f"- num_hops: integer, number of distinct relationship steps to answer the question\n"
+                f"  1 = single hop: one triple connects entity directly to answer\n"
+                f"      e.g. 'Where was Keanu Reeves born?' -> entity->birthPlace->answer (1 hop)\n"
+                f"  2 = two hops: two triples connected by an intermediate variable\n"
+                f"      e.g. 'What is the land size of the country where Oxford is?' -> Oxford->country->?c->area->answer (2 hops)\n"
+                f"      e.g. 'What is the motto of the unit Stewart Bovell served in?' -> Bovell->militaryBranch->?unit->motto->answer (2 hops)\n"
+                f"  3 = three or more hops: rare, only for questions with 3+ chained relationships\n\n"
                 f"Examples:\n"
-                f"Q: How many movies directed by Nolan? -> aggregator=COUNT, join_type=SINGLE, has_type_filter=true\n"
-                f"Q: Where were JK Rowling and Einstein born? -> aggregator=NONE, join_type=INTERSECTION, has_type_filter=false\n"
-                f"Q: Which organizations were founded in 1990? -> aggregator=NONE, join_type=SINGLE, has_type_filter=true\n"
-                f"Q: List 10 countries by population -> aggregator=ORDER_BY_DESC, join_type=SINGLE, has_type_filter=true\n"
-                f"Q: How many people study at California universities? -> aggregator=SUM, join_type=SINGLE, has_type_filter=true"
+                f"Q: How many movies directed by Nolan? -> aggregator=COUNT, join_type=SINGLE, has_type_filter=true, num_hops=1\n"
+                f"Q: Where were JK Rowling and Einstein born? -> aggregator=NONE, join_type=INTERSECTION, has_type_filter=false, num_hops=1\n"
+                f"Q: Which organizations were founded in 1990? -> aggregator=NONE, join_type=SINGLE, has_type_filter=true, num_hops=1\n"
+                f"Q: List 10 countries by population -> aggregator=ORDER_BY_DESC, join_type=SINGLE, has_type_filter=true, num_hops=1\n"
+                f"Q: How many people study at California universities? -> aggregator=SUM, join_type=SINGLE, has_type_filter=true, num_hops=1\n"
+                f"Q: What is the area of the country where Oxford is located? -> aggregator=NONE, join_type=SINGLE, has_type_filter=false, num_hops=2\n"
+                f"Q: What is the motto of the unit Stewart Bovell served in? -> aggregator=NONE, join_type=SINGLE, has_type_filter=false, num_hops=2"
             ),
         },
     ]
@@ -520,7 +534,7 @@ def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
     analysis = _extract_json(response)
 
     print(f"[PLANNER] entities={analysis.get('entities')} concepts={analysis.get('concepts')}")
-    print(f"[PLANNER] aggregator={analysis.get('aggregator')} join={analysis.get('join_type')} type_filter={analysis.get('has_type_filter')}")
+    print(f"[PLANNER] aggregator={analysis.get('aggregator')} join={analysis.get('join_type')} type_filter={analysis.get('has_type_filter')} num_hops={analysis.get('num_hops', 1)}")
 
     return {
         "entities":        analysis.get("entities", []),
@@ -529,6 +543,7 @@ def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
         "aggregator":      analysis.get("aggregator", "NONE"),
         "join_type":       analysis.get("join_type", "SINGLE"),
         "has_type_filter": analysis.get("has_type_filter", False),
+        "num_hops":        int(analysis.get("num_hops", 1)),
     }
 
 
@@ -640,7 +655,8 @@ def query_builder_node(state: KGQAState, client, model: Optional[str] = None) ->
         f"Answer type: {state.get('answer_type', 'unknown')}\n"
         f"Aggregator: {state.get('aggregator', 'NONE')}\n"
         f"Join type: {state.get('join_type', 'SINGLE')}\n"
-        f"Has type filter: {state.get('has_type_filter', False)}\n\n"
+        f"Has type filter: {state.get('has_type_filter', False)}\n"
+        f"Num hops: {state.get('num_hops', 1)}\n\n"
         f"Linked entities:\n{entity_context}\n"
         f"Relevant ontology terms:\n{ontology_context}\n"
     )
@@ -1065,7 +1081,8 @@ class KGQAAgent:
             graph  = build_graph(redis_el=self.redis_el, model=model)
             result = graph.invoke({"question": question, "model": model,
                                    "validator_attempts": 0, "exec_attempts": 0,
-                                   "probe_context": "", "probe_results": {}})
+                                   "probe_context": "", "probe_results": {},
+                                   "num_hops": 1})
             return result.get("sparql_final") or result.get("sparql", "")
         return self._answer_sequential(question, model=model)
 
