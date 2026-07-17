@@ -34,6 +34,8 @@ DATA_DIR       = _REPO_ROOT / "data"
 EVALS_DIR      = DATA_DIR / "evals"
 GOLD_CACHE_DB26 = DATA_DIR / "db26_gold_final.json"
 GOLD_CACHE_DB25 = DATA_DIR / "db25_gold_final.json"
+GOLD_CACHE_QALD9PLUS = DATA_DIR / "qald9plus_gold_final.json"
+BENCHMARK_QALD9PLUS  = _REPO_ROOT / "benchmark" / "questions_qald9plus.json"
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 JUDGE_MODEL = "anthropic/claude-sonnet-4.6"
@@ -42,6 +44,7 @@ ENDPOINT    = "http://research.liberai.org:7878/sparql"
 # ─── Gold cache ───────────────────────────────────────────────────────────────
 _gold_cache_db26 = None
 _gold_cache_db25 = None
+_gold_cache_qald9plus = None
 
 
 def _load_gold_cache_db26() -> dict:
@@ -88,6 +91,26 @@ def _load_gold_cache_db25() -> dict:
     return _gold_cache_db25
 
 
+def _load_gold_cache_qald9plus() -> dict:
+    """Load pre-computed QALD-9-Plus gold results from data/qald9plus_gold_final.json.
+
+    Returns {question_id: gold_result_dict}. Falls back to live execution
+    if the cache file does not exist -- run scripts/build_qald9plus_gold.py first.
+    """
+    global _gold_cache_qald9plus
+    if _gold_cache_qald9plus is not None:
+        return _gold_cache_qald9plus
+    if not GOLD_CACHE_QALD9PLUS.exists():
+        print(f"[WARN] Gold cache not found at {GOLD_CACHE_QALD9PLUS}. "
+              f"Run scripts/build_qald9plus_gold.py to build it.")
+        _gold_cache_qald9plus = {}
+        return _gold_cache_qald9plus
+    with open(GOLD_CACHE_QALD9PLUS) as f:
+        data = json.load(f)
+    _gold_cache_qald9plus = {q["id"]: q["gold_result"] for q in data.get("questions", [])}
+    return _gold_cache_qald9plus
+
+
 # ─── LLM client ───────────────────────────────────────────────────────────────
 def _get_judge_client():
     return OpenAI(
@@ -98,6 +121,25 @@ def _get_judge_client():
 
 # ─── Benchmark loader ─────────────────────────────────────────────────────────
 def load_benchmark(benchmark: str = "db26") -> list:
+    if benchmark == "qald9plus":
+        with open(BENCHMARK_QALD9PLUS) as f:
+            data = json.load(f)
+        seen_ids  = set()
+        questions = []
+        for q in data.get("questions", []):
+            qid    = str(q["id"])
+            sparql = q.get("query", {}).get("sparql", "").strip()
+            en_text = next(
+                (item["string"] for item in q.get("question", [])
+                 if item.get("language") == "en"),
+                ""
+            ).strip()
+            if not en_text or not sparql or qid in seen_ids:
+                continue
+            seen_ids.add(qid)
+            questions.append({"id": qid, "question": en_text, "expected_sparql": sparql})
+        return questions
+
     path = BENCHMARK_DB26 if benchmark == "db26" else BENCHMARK_DB25
     with open(path) as f:
         data = yaml.safe_load(f)
@@ -234,6 +276,8 @@ def _result_set_match(gen: dict, exp: dict) -> bool:
         e_rows = exp.get("rows", [])
         g = set(frozenset(r.values()) for r in g_rows)
         e = set(frozenset(r.values()) for r in e_rows)
+        if not g and not e:
+            return False  # both empty = both failed, not a match
         if g == e:
             return True
         g_num = _is_single_numeric(g_rows)
@@ -259,7 +303,7 @@ def _prf(gen: dict, exp: dict) -> tuple:
         g = set(frozenset(r.values()) for r in g_rows)
         e = set(frozenset(r.values()) for r in e_rows)
         if not g and not e:
-            return 1.0, 1.0, 1.0
+            return 0.0, 0.0, 0.0  # both empty = both failed, not a match
         if not g or not e:
             return 0.0, 0.0, 0.0
         if g == e:
@@ -328,6 +372,7 @@ def evaluate_pipeline(
                 "exec_attempts":     0,
                 "probe_context":     "",
                 "probe_results":     {},
+                "num_hops":          1,
             })
             generated_sparql = state.get("sparql_final") or state.get("sparql", "")
             exec_fallback    = state.get("exec_fallback")
@@ -389,6 +434,9 @@ def evaluate_pipeline(
             exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
         elif benchmark == "db25":
             gold_cache = _load_gold_cache_db25()
+            exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
+        elif benchmark == "qald9plus":
+            gold_cache = _load_gold_cache_qald9plus()
             exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
         else:
             exp_result = _execute_sparql(expected_sparql)
