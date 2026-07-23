@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate the agentic KGQA pipeline against DB25 or DB26 benchmark.
+"""Evaluate the agentic KGQA pipeline against DB25 or DB26 or QALD-9-Plus benchmark.
 
 All generated SPARQL queries run against the DBpedia evaluation endpoint.
 Gold results for DB26 are read from a pre-computed cache (data/db26_gold_final.json)
@@ -350,6 +350,7 @@ def evaluate_pipeline(
     total_f1           = 0.0
     total_precision    = 0.0
     total_recall       = 0.0
+    total_steps        = 0
 
     print(f"\n{'='*70}")
     print(f"Evaluating | benchmark={benchmark} | n={n} | model={model}")
@@ -449,11 +450,12 @@ def evaluate_pipeline(
         total_f1        += f1
         total_precision += precision
         total_recall    += recall
+        total_steps     += exec_attempts + val_attempts
 
         sparql_icon = "✅" if sparql_match else "❌"
         rs_icon     = "✅" if rs_match     else "❌"
         print(f"  SPARQL:{sparql_icon}  Result-set:{rs_icon}  "
-              f"P={precision:.2f}  R={recall:.2f}  F1={f1:.2f}")
+              f"P={precision:.2f}  R={recall:.2f}  F1={f1:.2f}  Steps={exec_attempts + val_attempts}")
         print(f"  Judge: {comparison.get('explanation', '')[:80]}")
 
         results.append({
@@ -481,6 +483,7 @@ def evaluate_pipeline(
     avg_f1   = round(total_f1        / total, 4) if total else 0.0
     avg_prec = round(total_precision / total, 4) if total else 0.0
     avg_rec  = round(total_recall    / total, 4) if total else 0.0
+    avg_steps = round(total_steps     / total, 2) if total else 0.0
 
     fallback_counts   = {}
     val_action_counts = {}
@@ -499,6 +502,7 @@ def evaluate_pipeline(
     print(f"  Avg Precision:     {avg_prec}")
     print(f"  Avg Recall:        {avg_rec}")
     print(f"  Avg F1:            {avg_f1}")
+    print(f"  Avg steps/question:{avg_steps}")
     print(f"  Exec fallbacks:    {fallback_counts}")
     print(f"  Validator actions: {val_action_counts}")
     print(f"{'='*70}")
@@ -522,6 +526,7 @@ def evaluate_pipeline(
             "avg_precision":              avg_prec,
             "avg_recall":                 avg_rec,
             "avg_f1":                     avg_f1,
+            "avg_steps_per_question":      avg_steps,
             "exec_fallback_breakdown":    fallback_counts,
             "validator_action_breakdown": val_action_counts,
         },
