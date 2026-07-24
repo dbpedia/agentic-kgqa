@@ -100,6 +100,9 @@ Rules:
   ALWAYS write SELECT (COUNT(DISTINCT ?var) AS ?count) for count queries.
   ALWAYS write SELECT (COUNT(DISTINCT ?var) AS ?count) for count questions like 'how many', 'count'.
   For arithmetic expressions like 'difference between X and Y': SELECT (?val1 - ?val2 AS ?result)
+- LIMIT RULE: NEVER add a LIMIT clause unless aggregator is ORDER_BY_DESC or ORDER_BY_ASC,
+  or the question explicitly says 'top N', 'first N', or gives a specific number.
+  Questions like 'name some', 'list all', 'which are' with aggregator=NONE must NOT have LIMIT.
 - JOIN TYPE: Use the join_type field from the analysis:
   INTERSECTION -> shared variable pattern: <X> pred ?uri . <Y> pred ?uri (finds common values)
   UNION -> { <X> pred ?uri } UNION { <Y> pred ?uri } (finds values from either)
@@ -136,7 +139,7 @@ Rules:
   CORRECT: <X> dbo:birthPlace ?uri . <Y> dbo:birthPlace ?uri  (finds places where BOTH were born)
   WRONG:   { <X> dbo:birthPlace ?uri } UNION { <Y> dbo:birthPlace ?uri }  (finds places where EITHER was born)
   Use UNION only when the question explicitly says 'or' or asks for results from either entity separately.
-- TRIPLE DIRECTION: Use the entity linking URI as the subject or object based on what makes sense.
+- TRIPLE DIRECTION (very important): Use the entity linking URI as the subject or object based on what makes sense.
   For "who is X's spouse" → X dbo:spouse ?uri. For "who married X" → ?uri dbo:spouse X.
   Keep the same direction as you would in natural language.
   IMPORTANT: Use domain/range metadata to determine correct triple direction.
