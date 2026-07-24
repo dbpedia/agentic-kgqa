@@ -215,6 +215,12 @@ SELECT (?p1 - ?p2 AS ?difference) WHERE {
   <http://dbpedia.org/resource/Delhi> <http://dbpedia.org/ontology/populationTotal> ?p2 .
 }
 ```
+Example 8 — "Which software works on both Windows and Android?" (INTERSECTION with two triples):
+```sparql
+SELECT DISTINCT ?uri WHERE {
+  ?uri <http://dbpedia.org/ontology/operatingSystem> <http://dbpedia.org/resource/Microsoft_Windows> .
+  ?uri <http://dbpedia.org/ontology/operatingSystem> <http://dbpedia.org/resource/Android_(operating_system)> .
+}
 """
 
 
