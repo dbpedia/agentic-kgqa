@@ -104,7 +104,13 @@ Rules:
   or the question explicitly says 'top N', 'first N', or gives a specific number.
   Questions like 'name some', 'list all', 'which are' with aggregator=NONE must NOT have LIMIT.
 - JOIN TYPE: Use the join_type field from the analysis:
-  INTERSECTION -> shared variable pattern: <X> pred ?uri . <Y> pred ?uri (finds common values)
+  INTERSECTION -> shared variable pattern: ?uri pred <X> . ?uri pred <Y> (finds resources linked to BOTH)
+                  Use the EXACT entity URIs from the linked entities list for X and Y.
+                  Example (software on Windows AND Android):
+                    ?uri <http://dbpedia.org/ontology/operatingSystem> <http://dbpedia.org/resource/Microsoft_Windows> .
+                    ?uri <http://dbpedia.org/ontology/operatingSystem> <http://dbpedia.org/resource/Android_(operating_system)> .
+                  NEVER use FILTER or UNION for INTERSECTION -- always use two separate triple patterns
+                  sharing the same subject variable.
   UNION -> { <X> pred ?uri } UNION { <Y> pred ?uri } (finds values from either)
   SINGLE -> normal single triple pattern
 - HOP COUNT: Count how many distinct relationships the question describes in its chain, and match
@@ -151,6 +157,15 @@ Rules:
     CORRECT: <Film> dbo:starring <Person>
     WRONG:   <Person> dbo:starring <Film>
   Rule: the linked entity goes in the position (subject or object) that matches its type against domain/range.
+  For "coached by", "trained by", "managed by", "supervised by" questions:
+    CORRECT: ?person dbo:coach <Coach> (the PERSON is the subject, coach is the object)
+    WRONG:   <Coach> dbo:coach ?person
+  For political role questions ("prime ministers of UK", "presidents of France"):
+    CORRECT: ?person dbo:primeMinister <http://dbpedia.org/resource/United_Kingdom>
+    WRONG:   ?person rdf:type dbo:PrimeMinister (this class does not exist in DBpedia)
+    The role is a PREDICATE linking the person to the country, not an rdf:type class.
+  General rule: when the question asks "who was X-ed by Y" or "who holds role R in country C",
+    the answer variable is the SUBJECT, and Y or C is the OBJECT of the predicate.
 - ALWAYS use SELECT DISTINCT for queries that return resource URIs or literal values.
 - For boolean questions, use ASK WHERE { ... }.
 - For count questions, use SELECT (COUNT(DISTINCT ?var) AS ?count) WHERE { ... }.
@@ -215,12 +230,27 @@ SELECT (?p1 - ?p2 AS ?difference) WHERE {
   <http://dbpedia.org/resource/Delhi> <http://dbpedia.org/ontology/populationTotal> ?p2 .
 }
 ```
-Example 8 — "Which software works on both Windows and Android?" (INTERSECTION with two triples):
+Example 8 — "Who are the chancellors of Germany?" (political role as predicate, not rdf:type):
+```sparql
+SELECT DISTINCT ?uri WHERE {
+  ?uri <http://dbpedia.org/ontology/chancellor> <http://dbpedia.org/resource/Germany> .
+}
+```
+
+Example 9 — "Who are the players trained by Jose Mourinho?" (trained by = player is subject):
+```sparql
+SELECT DISTINCT ?uri WHERE {
+  ?uri <http://dbpedia.org/ontology/coach> <http://dbpedia.org/resource/Jos%C3%A9_Mourinho> .
+}
+```
+
+Example 10 — "Which software works on both Windows and Android?" (INTERSECTION with two triples):
 ```sparql
 SELECT DISTINCT ?uri WHERE {
   ?uri <http://dbpedia.org/ontology/operatingSystem> <http://dbpedia.org/resource/Microsoft_Windows> .
   ?uri <http://dbpedia.org/ontology/operatingSystem> <http://dbpedia.org/resource/Android_(operating_system)> .
 }
+```
 """
 
 
