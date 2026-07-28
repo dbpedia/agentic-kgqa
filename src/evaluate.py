@@ -351,6 +351,7 @@ def evaluate_pipeline(
     total_precision    = 0.0
     total_recall       = 0.0
     total_steps        = 0
+    steps_list         = []
 
     print(f"\n{'='*70}")
     print(f"Evaluating | benchmark={benchmark} | n={n} | model={model}")
@@ -451,6 +452,7 @@ def evaluate_pipeline(
         total_precision += precision
         total_recall    += recall
         total_steps     += exec_attempts + val_attempts
+        steps_list.append(exec_attempts + val_attempts)
 
         sparql_icon = "✅" if sparql_match else "❌"
         rs_icon     = "✅" if rs_match     else "❌"
@@ -485,6 +487,15 @@ def evaluate_pipeline(
     avg_rec  = round(total_recall    / total, 4) if total else 0.0
     avg_steps = round(total_steps     / total, 2) if total else 0.0
 
+    # Median and mode of steps
+    sorted_steps   = sorted(steps_list)
+    mid            = total // 2
+    median_steps   = sorted_steps[mid] if total % 2 != 0 else (sorted_steps[mid - 1] + sorted_steps[mid]) / 2
+    freq           = {}
+    for s in steps_list:
+        freq[s] = freq.get(s, 0) + 1
+    mode_steps     = max(freq, key=freq.get) if freq else 0
+
     fallback_counts   = {}
     val_action_counts = {}
     for r in results:
@@ -503,6 +514,8 @@ def evaluate_pipeline(
     print(f"  Avg Recall:        {avg_rec}")
     print(f"  Avg F1:            {avg_f1}")
     print(f"  Avg steps/question:{avg_steps}")
+    print(f"  Median steps:      {median_steps}")
+    print(f"  Mode steps:        {mode_steps}")
     print(f"  Exec fallbacks:    {fallback_counts}")
     print(f"  Validator actions: {val_action_counts}")
     print(f"{'='*70}")
@@ -527,6 +540,8 @@ def evaluate_pipeline(
             "avg_recall":                 avg_rec,
             "avg_f1":                     avg_f1,
             "avg_steps_per_question":      avg_steps,
+            "median_steps_per_question":    median_steps,
+            "mode_steps_per_question":      mode_steps,
             "exec_fallback_breakdown":    fallback_counts,
             "validator_action_breakdown": val_action_counts,
         },
