@@ -35,6 +35,13 @@ from src.sparql_client import execute, needs_fix
 MAX_VALIDATOR_RETRIES  = 2
 UNFILTERED_PROBE_LIMIT = 30
 
+# Feature flag: two-hop probe chaining. When True, for num_hops>=2 questions
+# the Validator also resolves the intermediate entity (by executing just the
+# first-hop triple) and probes THAT entity too, not just the original subject.
+# Set to False to instantly revert to subject-only probing if this regresses
+# results -- no other code needs to change.
+ENABLE_TWO_HOP_PROBE_CHAINING = True
+
 
 # ─── Agentic Probe ────────────────────────────────────────────────────────────
 
@@ -148,6 +155,68 @@ def _extract_subjects(sparql: str) -> list:
     return result
 
 
+# ─── Two-hop probe chaining ────────────────────────────────────────────────────
+
+_FIRST_HOP_TRIPLE_RE = re.compile(
+    r"<(http://dbpedia\.org/resource/[^>]+)>\s+"   # subject: literal entity URI
+    r"<(http://dbpedia\.org/[^>]+)>\s+"             # predicate URI
+    r"\?(\w+)\s*\."                                  # object: a variable
+)
+
+
+def _find_intermediate_hops(sparql: str) -> list:
+    """Find first-hop triples whose object variable is later used as the
+    SUBJECT of another triple -- i.e. the variable is an intermediate hop,
+    not the final answer variable.
+
+    Returns [(subject_uri, predicate_uri, variable_name), ...]
+    """
+    first_hop_triples = _FIRST_HOP_TRIPLE_RE.findall(sparql)
+    if not first_hop_triples:
+        return []
+
+    subject_var_re = re.compile(r"\?(\w+)\s+<http://dbpedia\.org/")
+    vars_used_as_subject = set(subject_var_re.findall(sparql))
+
+    return [
+        (subj, pred, var)
+        for subj, pred, var in first_hop_triples
+        if var in vars_used_as_subject
+    ]
+
+
+def _resolve_intermediate_entities(sparql: str) -> list:
+    """For a two-hop (or more) query, resolve what the intermediate variable
+    actually binds to by executing just the first-hop triple standalone.
+
+    This lets the Validator probe the REAL intermediate entity (e.g. the
+    country Oxford is in) instead of only ever probing the original subject
+    (Oxford itself) -- the original subject-only probe can never discover a
+    second-hop property that only exists on the intermediate entity.
+
+    Returns a deduplicated list of resolved intermediate resource URIs.
+    """
+    hops = _find_intermediate_hops(sparql)
+    resolved, seen = [], set()
+
+    for subj, pred, var in hops:
+        probe_query = f"""
+SELECT DISTINCT ?{var} WHERE {{
+  <{subj}> <{pred}> ?{var} .
+}}
+LIMIT 5
+"""
+        result = execute(probe_query, timeout=10)
+        if result["type"] == "select":
+            for row in result.get("rows", []):
+                val = row.get(var, "")
+                if val.startswith("http://dbpedia.org/resource/") and val not in seen:
+                    seen.add(val)
+                    resolved.append(val)
+
+    return resolved
+
+
 def _strip_disambiguation_suffix(uri: str):
     """Strip disambiguation suffix from a DBpedia resource URI.
 
@@ -210,6 +279,18 @@ def validate(state: dict) -> dict:
     # Rule 4: run agentic probe and retry Query Builder
     print(f"[VALIDATOR] Result needs fix ({reason}). Running agentic probe...")
     subjects = _extract_subjects(sparql)
+
+    # Two-hop probe chaining: for multi-hop questions, also resolve and probe
+    # the intermediate entity, not just the original subject. This directly
+    # addresses cases where the second-hop predicate only exists on the
+    # intermediate entity (e.g. Oxford -> country -> ?country -> areaTotal),
+    # which subject-only probing could never discover.
+    if ENABLE_TWO_HOP_PROBE_CHAINING and state.get("num_hops", 1) >= 2:
+        intermediate_uris = _resolve_intermediate_entities(sparql)
+        for uri in intermediate_uris:
+            if uri not in subjects:
+                subjects.append(uri)
+                print(f"  [VALIDATOR] Resolved intermediate entity for two-hop probe: {uri.split('/')[-1]}")
 
     if not subjects:
         print(f"[VALIDATOR] No subjects found in SPARQL. Action: GIVE_UP")
