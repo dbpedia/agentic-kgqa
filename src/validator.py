@@ -42,11 +42,25 @@ UNFILTERED_PROBE_LIMIT = 30
 # results -- no other code needs to change.
 ENABLE_TWO_HOP_PROBE_CHAINING = True
 
+# Feature flag: type-aware probe filtering. When True, probing the ORIGINAL
+# subject(s) of a multi-hop question (num_hops>=2) only surfaces properties
+# whose value is a URI, since that value must resolve further as the subject
+# of the second-hop triple -- a plain string/literal value there can never be
+# joined against. Does not apply to single-hop questions or to resolved
+# intermediate entities (their property IS the final answer, which is often
+# a literal). Set to False to instantly revert -- no other code needs to change.
+ENABLE_TYPE_AWARE_PROBE_FILTERING = True
+
 
 # ─── Agentic Probe ────────────────────────────────────────────────────────────
 
-def _probe_keyword(subject: str, concept: str) -> list:
-    """Stage 1: keyword-filtered dbp: probe for a single subject x concept pair."""
+def _probe_keyword(subject: str, concept: str, require_uri_value: bool = False) -> list:
+    """Stage 1: keyword-filtered dbp: probe for a single subject x concept pair.
+
+    When require_uri_value is True, an additional ISURI(?o) filter is applied
+    so only properties with a joinable URI value come back -- used when this
+    subject's property will become the intermediate variable of a second hop.
+    """
     keywords = [w.lower() for w in re.split(r"\s+", concept) if len(w) > 2]
     if not keywords:
         return []
@@ -54,24 +68,30 @@ def _probe_keyword(subject: str, concept: str) -> list:
     filter_parts = " || ".join(
         f'CONTAINS(LCASE(STR(?p)), "{kw}")' for kw in keywords
     )
+    uri_filter = "FILTER(ISURI(?o))\n  " if require_uri_value else ""
     query = f"""
 SELECT DISTINCT ?p ?o WHERE {{
   <{subject}> ?p ?o .
   FILTER(STRSTARTS(STR(?p), "http://dbpedia.org/property/"))
-  FILTER({filter_parts})
+  {uri_filter}FILTER({filter_parts})
 }}
 LIMIT 10
 """
     return _extract_props(execute(query, timeout=10))
 
 
-def _probe_unfiltered(subject: str) -> list:
-    """Stage 2 fallback: list ALL dbp: properties for a subject."""
+def _probe_unfiltered(subject: str, require_uri_value: bool = False) -> list:
+    """Stage 2 fallback: list ALL dbp: properties for a subject.
+
+    When require_uri_value is True, only properties with a joinable URI value
+    are returned -- see _probe_keyword for why this matters.
+    """
+    uri_filter = "FILTER(ISURI(?o))\n  " if require_uri_value else ""
     query = f"""
 SELECT DISTINCT ?p ?o WHERE {{
   <{subject}> ?p ?o .
   FILTER(STRSTARTS(STR(?p), "http://dbpedia.org/property/"))
-}}
+  {uri_filter}}}
 LIMIT {UNFILTERED_PROBE_LIMIT}
 """
     return _extract_props(execute(query, timeout=10))
@@ -92,23 +112,30 @@ def _extract_props(result: dict) -> list:
     return props
 
 
-def _probe_dbpedia(subjects: list, concepts: list) -> dict:
+def _probe_dbpedia(subjects: list, concepts: list, uri_required_subjects: set = None) -> dict:
     """Run the two-stage probe for every subject x concept pair.
+
+    uri_required_subjects: optional set of subject URIs for which only
+    URI-valued properties should be surfaced (see _probe_keyword). Subjects
+    not in this set are probed normally with no value-type restriction.
 
     Returns: {subject: {concept: [(property_uri, sample_value), ...]}}
     """
+    uri_required_subjects = uri_required_subjects or set()
     found = {}
     for subject in subjects:
+        require_uri = subject in uri_required_subjects
         subject_found = {}
         for concept in concepts:
-            print(f"  [VALIDATOR:PROBE] subject={subject.split('/')[-1]} concept='{concept}'")
-            props = _probe_keyword(subject, concept)
+            print(f"  [VALIDATOR:PROBE] subject={subject.split('/')[-1]} concept='{concept}'" +
+                  ("  (URI-valued only)" if require_uri else ""))
+            props = _probe_keyword(subject, concept, require_uri_value=require_uri)
             if props:
                 for p, o in props:
                     print(f"  [VALIDATOR:PROBE]   found {p.split('/')[-1]} = {str(o)[:40]}")
             else:
                 print(f"  [VALIDATOR:PROBE]   keyword probe found nothing, trying unfiltered fallback...")
-                props = _probe_unfiltered(subject)
+                props = _probe_unfiltered(subject, require_uri_value=require_uri)
                 if props:
                     print(f"  [VALIDATOR:PROBE]   unfiltered probe found {len(props)} properties")
                 else:
@@ -279,6 +306,7 @@ def validate(state: dict) -> dict:
     # Rule 4: run agentic probe and retry Query Builder
     print(f"[VALIDATOR] Result needs fix ({reason}). Running agentic probe...")
     subjects = _extract_subjects(sparql)
+    original_subjects = set(subjects)  # captured before intermediates are appended below
 
     # Two-hop probe chaining: for multi-hop questions, also resolve and probe
     # the intermediate entity, not just the original subject. This directly
@@ -300,7 +328,10 @@ def validate(state: dict) -> dict:
                 "probe_results":      state.get("probe_results", {}),
                 "validator_attempts": validator_attempts + 1}
 
-    probe_results = _probe_dbpedia(subjects, concepts)
+    probe_results = _probe_dbpedia(
+        subjects, concepts,
+        uri_required_subjects=original_subjects if (ENABLE_TYPE_AWARE_PROBE_FILTERING and state.get("num_hops", 1) >= 2) else None
+    )
 
     if not probe_results:
         # Rule 4.5: dead URI detection
