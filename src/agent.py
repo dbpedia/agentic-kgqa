@@ -1126,65 +1126,119 @@ class KGQAAgent:
         return self._answer_sequential(question, model=model)
 
     def answer_stream(self, question, model=None):
-        """Streaming pipeline that yields (step_name, data) tuples for each stage."""
+        """Streaming pipeline that yields (step_name, data) tuples for each stage.
+
+        Runs the same graph-based pipeline used by answer() -- Planner, Entity
+        Linker, Ontology Explorer, Query Builder, Query Executor, Validator --
+        by calling the same standalone node functions build_graph() wires
+        together, so the live step-by-step UI reflects the current production
+        pipeline (num_hops, dead URI detection, two-hop probe chaining,
+        type-aware probe filtering) instead of a separate, older code path.
+
+        Event names, step ids, and payload shapes are kept identical to the
+        previous implementation so the existing frontend JS needs no changes.
+        """
+        model  = model or DEFAULT_MODEL
+        client = self.client
+
         yield ("question", {"question": question})
 
-        # Step 1: Analyse
+        state = {
+            "question": question, "model": model,
+            "validator_attempts": 0, "exec_attempts": 0,
+            "probe_context": "", "probe_results": {},
+            "num_hops": 1,
+        }
+
+        # Step 1: Planner
         yield ("step_start", {"step": "analyse", "label": "Analysing question..."})
-        analysis = self._analyse_question(question, model=model)
-        yield ("analyse", analysis)
+        state.update(planner_node(state, client, model=model))
+        yield ("analyse", {
+            "entities":        state.get("entities", []),
+            "answer_type":     state.get("answer_type", ""),
+            "concepts":        state.get("concepts", []),
+            "aggregator":      state.get("aggregator", "NONE"),
+            "join_type":       state.get("join_type", "SINGLE"),
+            "has_type_filter": state.get("has_type_filter", False),
+            "num_hops":        state.get("num_hops", 1),
+        })
 
-        entities = analysis.get("entities", [])
-        concepts = analysis.get("concepts", [])
-
-        # Step 2: Entity linking
+        # Step 2: Entity Linker
         yield ("step_start", {"step": "entity_linking", "label": "Linking entities via Redis..."})
-        linked_entities = self._link_entities(entities, question=question, model=model)
-        # Convert numpy floats for JSON serialisation
-        linked_serialisable = {}
-        for mention, candidates in linked_entities.items():
-            linked_serialisable[mention] = [
-                {k: float(v) if hasattr(v, "item") else v for k, v in c.items()}
+        state.update(entity_linker_node(state, self.redis_el, client, model=model))
+        linked_serialisable = {
+            mention: [
+                {k: (float(v) if hasattr(v, "item") else v) for k, v in c.items()}
                 for c in candidates
             ]
+            for mention, candidates in state.get("linked_entities", {}).items()
+        }
         yield ("entity_linking", linked_serialisable)
 
-        # Step 3: Ontology lookup
+        # Step 3: Ontology Explorer
         yield ("step_start", {"step": "ontology_lookup", "label": "Looking up ontology terms..."})
-        ontology_terms = self._lookup_ontology(concepts)
-        yield ("ontology_lookup", ontology_terms)
+        state.update(ontology_explorer_node(state))
+        yield ("ontology_lookup", state.get("ontology_terms", {}))
 
-        # Step 4: Generate SPARQL
-        yield ("step_start", {"step": "sparql_generation", "label": "Generating SPARQL query..."})
-        sparql = self._generate_sparql(question, linked_entities, ontology_terms, analysis, model=model)
-        yield ("sparql", {"query": sparql})
-
-        # Step 5: Verify and revise loop
-        for attempt in range(MAX_RETRIES + 1):
-            step_id = f"execution_{attempt}"
+        # Step 4: Query Builder -> Query Executor -> Validator loop.
+        # The Validator's own MAX_VALIDATOR_RETRIES cap (see src/validator.py)
+        # terminates this loop by returning "give_up" -- no separate retry
+        # counter is needed here.
+        attempt = 0
+        while True:
             if attempt == 0:
-                yield ("step_start", {"step": step_id, "label": "Testing query against DBpedia endpoint..."})
+                yield ("step_start", {"step": "sparql_generation", "label": "Generating SPARQL query..."})
             else:
-                yield ("step_start", {"step": step_id, "label": f"Testing revised query (attempt {attempt + 1})..."})
+                yield ("step_start", {"step": f"revision_{attempt - 1}", "label": f"Query builder retry #{attempt}..."})
 
-            result = execute_sparql(sparql)
-            needs_fix, reason = _needs_revision(result)
+            state.update(query_builder_node(state, client, model=model))
+            sparql = state.get("sparql", "")
 
-            if not needs_fix:
-                yield ("execution", {"attempt": attempt + 1, "result": result})
+            if attempt == 0:
+                yield ("sparql", {"query": sparql})
+            else:
+                yield ("revision", {"attempt": attempt, "query": sparql})
+
+            step_id = f"execution_{attempt}"
+            label = "Testing query against DBpedia endpoint..." if attempt == 0 else f"Testing revised query (attempt {attempt + 1})..."
+            yield ("step_start", {"step": step_id, "label": label})
+
+            state.update(query_executor_node(state, client, model=model))
+            exec_result = state.get("exec_result", {})
+
+            state.update(validator_node(state))
+            action = state.get("validator_action", "give_up")
+            reason = state.get("validator_reason", "")
+
+            # Cap displayed rows at 20 to match the previous UI behaviour --
+            # sparql_client.execute() caps at 200 internally for pipeline use,
+            # but the browser payload stays capped the same as before.
+            display_result = exec_result
+            if exec_result.get("type") == "select" and len(exec_result.get("rows", [])) > 20:
+                display_result = {**exec_result, "rows": exec_result["rows"][:20]}
+
+            # Everything visible in the terminal for this step, mirrored to the UI:
+            # which fallback fired, cumulative attempts, the validator's decision,
+            # and any agentic probe findings that informed a retry.
+            extra = {
+                "exec_fallback":    state.get("exec_fallback"),
+                "exec_attempts":    state.get("exec_attempts", 0),
+                "validator_action": action,
+                "probe_results":    state.get("probe_results", {}),
+            }
+
+            if action == "pass":
+                yield ("execution", {"attempt": attempt + 1, "result": display_result, **extra})
+                break
+            elif action == "retry_query_builder":
+                yield ("execution", {"attempt": attempt + 1, "result": display_result, "problem": reason, **extra})
+                attempt += 1
+                continue
+            else:  # give_up
+                yield ("execution", {"attempt": attempt + 1, "result": display_result, "problem": reason, **extra})
                 break
 
-            yield ("execution", {"attempt": attempt + 1, "result": result, "problem": reason})
-
-            if attempt < MAX_RETRIES:
-                rev_id = f"revision_{attempt}"
-                yield ("step_start", {"step": rev_id, "label": f"Query returned {reason}, revising..."})
-                sparql = self._revise_sparql(
-                    question, sparql, result, linked_entities, ontology_terms, analysis, model=model
-                )
-                yield ("revision", {"attempt": attempt + 1, "query": sparql})
-
-        yield ("done", {"query": sparql})
+        yield ("done", {"query": state.get("sparql_final") or state.get("sparql", "")})
 
 
 # ─── LangGraph ────────────────────────────────────────────────────────────────

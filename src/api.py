@@ -335,6 +335,60 @@ function formatOntology(data) {
   return out || '(none)';
 }
 
+function formatProbeResults(probe) {
+  if (!probe || Object.keys(probe).length === 0) return '';
+  let out = 'Agentic probe results:\\n';
+  for (const [subject, concepts] of Object.entries(probe)) {
+    out += `  ${subject}\\n`;
+    for (const [concept, props] of Object.entries(concepts)) {
+      out += `    '${concept}':\\n`;
+      for (const pair of props) {
+        const p = pair[0], v = pair[1];
+        out += `      ${p}  =  ${String(v).slice(0, 60)}\\n`;
+      }
+    }
+  }
+  return out;
+}
+
+function formatExecution(d) {
+  const data = d.result;
+  const problem = d.problem;
+
+  let meta = '';
+  if (d.exec_fallback) meta += `Fallback: ${d.exec_fallback}\\n`;
+  if (d.exec_attempts != null) meta += `Executor attempts (total): ${d.exec_attempts}\\n`;
+  if (d.validator_action) meta += `Validator action: ${d.validator_action}\\n`;
+  const probeText = formatProbeResults(d.probe_results);
+  if (probeText) meta += probeText;
+  if (meta) meta += '\\n';
+
+  const disclaimer = '(!) Results from the DBpedia SPARQL endpoint.\\n\\n';
+  if (!data) return meta + disclaimer;
+  if (data.type === 'error') {
+    return meta + disclaimer + 'Error: ' + data.message;
+  }
+  if (data.type === 'ask') {
+    return meta + disclaimer + 'Result: ' + (data.result ? 'YES' : 'NO');
+  }
+  if (data.type === 'select') {
+    if (data.rows.length === 0) {
+      let out = problem ? `Problem: ${problem}` : '(no results)';
+      return meta + disclaimer + out;
+    }
+    const vars = data.vars;
+    let out = disclaimer;
+    out += vars.join('  |  ') + '\\n';
+    out += vars.map(v => '-'.repeat(v.length + 4)).join('') + '\\n';
+    for (const row of data.rows) {
+      out += vars.map(v => row[v] || '').join('  |  ') + '\\n';
+    }
+    if (data.total > 20) out += `\\n... and ${data.total - 20} more rows`;
+    return meta + out;
+  }
+  return meta + disclaimer + JSON.stringify(data, null, 2);
+}
+
 let currentStep = null;
 
 function run() {
@@ -361,7 +415,11 @@ function run() {
     setBody('analyse',
       `Entities: ${(d.entities||[]).join(', ')}\\n` +
       `Answer type: ${d.answer_type}\\n` +
-      `Concepts: ${(d.concepts||[]).join(', ')}`
+      `Concepts: ${(d.concepts||[]).join(', ')}\\n` +
+      `Aggregator: ${d.aggregator}\\n` +
+      `Join type: ${d.join_type}\\n` +
+      `Has type filter: ${d.has_type_filter}\\n` +
+      `Num hops: ${d.num_hops}`
     );
   });
 
@@ -382,7 +440,7 @@ function run() {
 
   es.addEventListener('execution', e => {
     const d = JSON.parse(e.data).data;
-    setBody(currentStep, formatExecution(d.result, d.problem));
+    setBody(currentStep, formatExecution(d));
   });
 
   es.addEventListener('revision', e => {
@@ -401,33 +459,6 @@ function run() {
     btn.disabled = false;
     if (currentStep) finishStep(currentStep);
   };
-}
-
-function formatExecution(data, problem) {
-  const disclaimer = '(!) Results from the DBpedia SPARQL endpoint.\\n\\n';
-  if (!data) return '';
-  if (data.type === 'error') {
-    return disclaimer + 'Error: ' + data.message;
-  }
-  if (data.type === 'ask') {
-    return disclaimer + 'Result: ' + (data.result ? 'YES' : 'NO');
-  }
-  if (data.type === 'select') {
-    if (data.rows.length === 0) {
-      let out = problem ? `Problem: ${problem}` : '(no results)';
-      return disclaimer + out;
-    }
-    const vars = data.vars;
-    let out = disclaimer;
-    out += vars.join('  |  ') + '\\n';
-    out += vars.map(v => '-'.repeat(v.length + 4)).join('') + '\\n';
-    for (const row of data.rows) {
-      out += vars.map(v => row[v] || '').join('  |  ') + '\\n';
-    }
-    if (data.total > 20) out += `\\n... and ${data.total - 20} more rows`;
-    return out;
-  }
-  return disclaimer + JSON.stringify(data, null, 2);
 }
 
 function escHtml(s) {
