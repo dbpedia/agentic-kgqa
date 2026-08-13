@@ -16,41 +16,22 @@ logger = logging.getLogger(__name__)
 
 app = fastapi.FastAPI(title="TEXT2SPARQL API - Agentic KGQA")
 
-DBPEDIA_DATASETS = [
+KNOWN_DATASETS = [
     "https://text2sparql.aksw.org/2025/dbpedia/",
     "https://text2sparql.aksw.org/2026/dbpedia/",
 ]
-CORPORATE_DATASETS = [
-    "https://text2sparql.aksw.org/2026/corporate/",
-]
-KNOWN_DATASETS = DBPEDIA_DATASETS + CORPORATE_DATASETS
 
 agent = None
-corporate_agent = None
 
 
 @app.on_event("startup")
 async def startup():
-    global agent, corporate_agent
+    global agent
     agent = KGQAAgent()
     logger.info("DBpedia KGQA Agent initialised.")
-    try:
-        from src.corporate_agent import CorporateKGQAAgent
-        corporate_agent = CorporateKGQAAgent()
-        logger.info("Corporate KGQA Agent initialised.")
-    except Exception as e:
-        logger.warning(f"Corporate agent not available (indexes not built?): {e}")
 
 
 # --- Challenge API endpoint (unchanged) ---
-
-
-def _get_agent_for_dataset(dataset: str):
-    if dataset in CORPORATE_DATASETS:
-        if corporate_agent is None:
-            raise fastapi.HTTPException(503, "Corporate agent not available — run scripts/build_corporate_index.py first")
-        return corporate_agent
-    return agent
 
 
 @app.get("/answer")
@@ -58,8 +39,7 @@ async def get_answer(question: str, dataset: str):
     if dataset not in KNOWN_DATASETS:
         raise fastapi.HTTPException(404, "Unknown dataset")
 
-    a = _get_agent_for_dataset(dataset)
-    sparql = a.answer(question)
+    sparql = agent.answer(question)
 
     return {
         "dataset": dataset,
@@ -79,10 +59,9 @@ async def get_models():
 # --- Streaming endpoint (SSE) ---
 
 
-def _event_stream(question: str, model: str | None = None, dataset: str | None = None):
+def _event_stream(question: str, model: str | None = None):
     """Generator that yields SSE events from the agent pipeline."""
-    a = _get_agent_for_dataset(dataset) if dataset in CORPORATE_DATASETS else agent
-    for event_type, data in a.answer_stream(question, model=model):
+    for event_type, data in agent.answer_stream(question, model=model):
         payload = json.dumps({"type": event_type, "data": data}, default=str)
         yield f"event: {event_type}\ndata: {payload}\n\n"
 
@@ -90,7 +69,7 @@ def _event_stream(question: str, model: str | None = None, dataset: str | None =
 @app.get("/stream")
 async def stream_answer(question: str, model: str | None = None, dataset: str | None = None):
     return StreamingResponse(
-        _event_stream(question, model=model, dataset=dataset),
+        _event_stream(question, model=model),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -110,8 +89,7 @@ async def model_get_answer(model_slug: str, question: str, dataset: str):
     model_id = _resolve_model_slug(model_slug)
     if dataset not in KNOWN_DATASETS:
         raise fastapi.HTTPException(404, "Unknown dataset")
-    a = _get_agent_for_dataset(dataset)
-    sparql = a.answer(question, model=model_id)
+    sparql = agent.answer(question, model=model_id)
     return {"dataset": dataset, "question": question, "query": sparql, "model": model_id}
 
 
@@ -119,7 +97,7 @@ async def model_get_answer(model_slug: str, question: str, dataset: str):
 async def model_stream_answer(model_slug: str, question: str, dataset: str | None = None):
     model_id = _resolve_model_slug(model_slug)
     return StreamingResponse(
-        _event_stream(question, model=model_id, dataset=dataset),
+        _event_stream(question, model=model_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -253,7 +231,6 @@ HTML_PAGE = """\
     <select id="dataset">
       <option value="https://text2sparql.aksw.org/2026/dbpedia/">DBpedia 2026</option>
       <option value="https://text2sparql.aksw.org/2025/dbpedia/">DBpedia 2025</option>
-      <option value="https://text2sparql.aksw.org/2026/corporate/">Corporate CK25</option>
     </select>
   </div>
 

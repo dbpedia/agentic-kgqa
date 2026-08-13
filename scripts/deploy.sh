@@ -22,16 +22,6 @@ rsync -avzL --delete \
   --exclude 'data' \
   "${PROJECT_DIR}/" "${HOST}:${REMOTE_DIR}/"
 
-echo "==> Syncing corporate embedding indexes ..."
-DATA_DIR="${PROJECT_DIR}/data"
-# Resolve symlink if data/ is a symlink
-if [ -L "${DATA_DIR}" ]; then DATA_DIR="$(readlink -f "${DATA_DIR}")"; fi
-ssh "${HOST}" "mkdir -p ${REMOTE_DIR}/data/corporate"
-rsync -avz \
-  "${DATA_DIR}/corporate/vocab-vectors.w2v" \
-  "${DATA_DIR}/corporate/instance-vectors.w2v" \
-  "${HOST}:${REMOTE_DIR}/data/corporate/"
-
 echo "==> Installing dependencies and starting service on remote ..."
 ssh "${HOST}" bash -s <<'REMOTE'
 set -euo pipefail
