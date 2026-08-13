@@ -307,35 +307,6 @@ def _chat(client, messages, model=None, max_tokens=None):
     raise ValueError(f"LLM returned None content after 3 attempts (model={model})")
 
 
-def execute_sparql(sparql, endpoint=None, timeout=40):
-    """Execute a SPARQL query against a public endpoint. Returns parsed JSON results or error string."""
-    endpoint = endpoint or DBPEDIA_SPARQL_ENDPOINT
-    params = urllib.parse.urlencode({"query": sparql, "format": "application/sparql-results+json"})
-    url = f"{endpoint}?{params}"
-    req = urllib.request.Request(url, headers={"Accept": "application/sparql-results+json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        # Parse SELECT results
-        if "results" in data and "bindings" in data["results"]:
-            bindings = data["results"]["bindings"]
-            variables = data.get("head", {}).get("vars", [])
-            rows = []
-            for b in bindings[:20]:  # cap at 20 rows for display
-                row = {}
-                for v in variables:
-                    if v in b:
-                        row[v] = b[v].get("value", "")
-                rows.append(row)
-            return {"type": "select", "vars": variables, "rows": rows, "total": len(bindings)}
-        # Parse ASK results
-        if "boolean" in data:
-            return {"type": "ask", "result": data["boolean"]}
-        return {"type": "unknown", "raw": data}
-    except Exception as e:
-        return {"type": "error", "message": str(e)}
-
-
 def _extract_json(text):
     """Extract JSON object from LLM response text."""
     if not text:
@@ -383,68 +354,6 @@ def _validate_sparql(sparql):
     if re.search(r"\{\s*\?[a-zA-Z_]+\s*\.\s*\}", body):
         return False
     return has_uri
-
-
-MAX_RETRIES = 2  # Up to 3 total attempts (1 initial + 2 revisions)
-
-REVISION_PROMPT = """\
-You are a SPARQL query repair agent for DBpedia.
-
-The previous query returned {problem}. The data in DBpedia is messy — types and properties
-may not match what you'd expect. Your job is to revise the query so it returns results.
-
-IMPORTANT: prefer SIMPLIFYING the query over adding UNION branches. The revised query should
-stay as close as possible to the original translation. Apply fixes in this order of preference:
-
-1. Remove rdf:type constraints (the most common cause of 0 results — entities are often not typed as expected)
-2. Try a synonym property from the ontology lookup (e.g. dbo:author -> dbo:writer)
-3. Only as a last resort, add a UNION — and keep it minimal
-
-ALWAYS use full URIs in angle brackets. NEVER use PREFIX declarations.
-
-Original question: {question}
-
-Failed query:
-{sparql}
-
-Execution result: {exec_summary}
-
-Linked entities:
-{entity_context}
-
-Relevant ontology terms:
-{ontology_context}
-
-Output ONLY the revised SPARQL query.
-"""
-
-
-_ONTOLOGY_URI_RE = re.compile(r"http://dbpedia\.org/ontology/([^\s<>\"'),.;]+)")
-
-
-def _swap_dbo_to_dbp(sparql):
-    """Deterministically swap dbo: ontology URIs to dbp: property URIs —
-    PROPERTY positions only.
-
-    This is the first fallback step in the executor — faster and more reliable
-    than asking the LLM to perform the swap inside a revision prompt.
-
-    DBpedia naming convention: properties are lowerCamelCase, classes are
-    UpperCamelCase. There is no dbp: namespace equivalent for classes —
-    dbp:FictionalCharacter, dbp:TelevisionShow, dbp:Software etc do not exist.
-    A naive blanket ontology/ -> property/ replace corrupts any rdf:type
-    constraint in the query (silently turning a valid class URI into a
-    non-existent dbp: URI, which then always returns zero results), so this
-    only swaps dbo: URIs whose local name starts with a lowercase letter
-    (i.e. properties), leaving class URIs untouched.
-    """
-    def _maybe_swap(match):
-        local_name = match.group(1)
-        if local_name and local_name[0].islower():
-            return f"http://dbpedia.org/property/{local_name}"
-        return match.group(0)  # leave class URIs (UpperCamelCase) untouched
-
-    return _ONTOLOGY_URI_RE.sub(_maybe_swap, sparql)
 
 
 def _needs_revision(exec_result):
@@ -511,15 +420,14 @@ class KGQAState(TypedDict):
 
 
 # ─── Standalone Node Functions ────────────────────────────────────────────────
-# These functions mirror the KGQAAgent class methods and are used by the
-# LangGraph StateGraph. The KGQAAgent class methods remain intact for
-# backward compatibility with CorporateKGQAAgent and existing callers.
+# These functions are wired together by build_graph() into the LangGraph
+# StateGraph. KGQAAgent.answer() and .answer_stream() both run this same
+# graph, so there is a single pipeline implementation used everywhere.
 
 def planner_node(state: KGQAState, client, model: Optional[str] = None) -> dict:
     """Planner node: analyse the question and extract entities, concepts, and
     query metadata (aggregator, join_type, has_type_filter).
 
-    Corresponds to KGQAAgent._analyse_question().
     Returns partial state update.
     """
     question = state["question"]
@@ -605,7 +513,6 @@ def _normalize_uri(uri: str) -> str:
 def entity_linker_node(state: KGQAState, redis_el, client, model: Optional[str] = None) -> dict:
     """Entity Linker node: link entity mentions to DBpedia resource URIs via Redis.
 
-    Corresponds to KGQAAgent._link_entities() + KGQAAgent._disambiguate_entity().
     Returns partial state update.
     """
     entities = state["entities"]
@@ -646,7 +553,6 @@ def ontology_explorer_node(state: KGQAState) -> dict:
     """Ontology Explorer + Schema Introspector node: look up relevant ontology
     terms for each concept and enrich with rdfs:domain and rdfs:range.
 
-    Corresponds to KGQAAgent._lookup_ontology().
     Returns partial state update.
     """
     concepts = state["concepts"]
@@ -669,7 +575,6 @@ def query_builder_node(state: KGQAState, client, model: Optional[str] = None) ->
 
     On validator retries, probe_context is injected into the user message so
     the LLM can use grounded live-probe evidence to correct its property choice.
-    Corresponds to KGQAAgent._generate_sparql().
     Returns partial state update.
     """
     question        = state["question"]
@@ -684,7 +589,6 @@ def query_builder_node(state: KGQAState, client, model: Optional[str] = None) ->
     else:
         print(f"\n[QUERY BUILDER] Generating SPARQL...")
 
-    # Reuse formatting helpers from KGQAAgent
     entity_context   = _format_entity_context(linked_entities)
     ontology_context = _format_ontology_context(ontology_terms)
 
@@ -748,7 +652,7 @@ def validator_node(state: KGQAState) -> dict:
     return _validator.validate(state)
 
 
-# ─── Formatting helpers (module-level for use by both node functions and KGQAAgent) ───
+# ─── Formatting helpers (module-level for use by node functions) ──────────────
 
 def _format_entity_context(linked_entities: dict) -> str:
     """Format linked entities for LLM prompts."""
@@ -799,7 +703,6 @@ def _format_ontology_context(ontology_terms: dict) -> str:
 def _disambiguate(client, question: str, mention: str, candidates: list, model: Optional[str] = None) -> list:
     """Use LLM to pick the most contextually appropriate entity from Redis candidates.
 
-    Extracted from KGQAAgent._disambiguate_entity() for use in entity_linker_node.
     Falls back to original list on failure.
     """
     if not candidates or len(candidates) == 1:
@@ -850,280 +753,15 @@ class KGQAAgent:
             logger.warning(f"Redis not available, entity linking disabled: {e}")
             self.redis_el = None
 
-    def _analyse_question(self, question, model=None):
-        """Step 1: Use LLM to extract entities and concepts from the question."""
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Analyse this question and extract entities and concepts.\n"
-                    f"Question: {question}\n\n"
-                    f"Output your analysis as JSON with these exact keys:\n"
-                    f"- entities: list of named entities (people, places, organisations, works)\n"
-                    f"  IMPORTANT: Always extract the FULL FORMAL name of each entity as it would appear in Wikipedia.\n"
-                    f"  Use all context clues in the question to reconstruct the complete official name.\n"
-                    f"  Never abbreviate or shorten entity names — prefer the longest most specific form.\n"
-                    f"- answer_type: one of resource, literal, count, boolean, list\n"
-                    f"- concepts: list of relationship/property keywords\n"
-                    f"- aggregator: one of NONE, COUNT, SUM, GROUP_BY, ORDER_BY_DESC, ORDER_BY_ASC\n"
-                    f"  (NONE = plain SELECT, COUNT = how many, SUM = total of values, GROUP_BY = list ranked by count, ORDER_BY_DESC/ASC = top-N or ranked list)\n"
-                    f"- join_type: one of INTERSECTION, UNION, SINGLE\n"
-                    f"  (INTERSECTION = question asks what two entities have IN COMMON using 'and', UNION = question asks about either entity using 'or', SINGLE = normal single-entity question)\n"
-                    f"- has_type_filter: true if the question explicitly asks for a category like 'which movies', 'list countries', 'how many companies' etc, false otherwise\n\n"
-                    f"Examples:\n"
-                    f"Q: How many movies directed by Nolan? -> aggregator=COUNT, join_type=SINGLE, has_type_filter=true\n"
-                    f"Q: Where were JK Rowling and Einstein born? -> aggregator=NONE, join_type=INTERSECTION, has_type_filter=false\n"
-                    f"Q: Which organizations were founded in 1990? -> aggregator=NONE, join_type=SINGLE, has_type_filter=true\n"
-                    f"Q: List 10 countries by population -> aggregator=ORDER_BY_DESC, join_type=SINGLE, has_type_filter=true\n"
-                    f"Q: How many people study at California universities? -> aggregator=SUM, join_type=SINGLE, has_type_filter=true"
-                ),
-            },
-        ]
-        response = _chat(self.client, messages, model=model)
-        return _extract_json(response)
-
-    def _link_entities(self, entities, question=None, model=None):
-        """Step 2: Link entity mentions to DBpedia resource URIs via Redis.
-
-        When a question is provided, calls _disambiguate_entity to use LLM reasoning
-        to pick the most contextually appropriate candidate from the top-k results.
-        """
-        linked = {}
-        for entity in entities:
-            if self.redis_el is None:
-                # Fallback: construct URI from entity name
-                uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
-                linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
-                continue
-
-            results = self.redis_el.lookup(entity, top_k=5, thr=0.01)
-            if len(results) > 0:
-                entries = []
-                for idx, row in results.iterrows():
-                    uri = idx if isinstance(idx, str) else row.name
-                    if not uri.startswith("http"):
-                        uri = "http://dbpedia.org/resource/" + uri
-                    uri = _normalize_uri(uri)
-                    entries.append({"uri": uri, "score": round(row["score"], 4), "source": "redis"})
-                if question and len(entries) > 1:
-                    entries = self._disambiguate_entity(question, entity, entries, model=model)
-                linked[entity] = entries
-            else:
-                # Fallback
-                uri = _normalize_uri("http://dbpedia.org/resource/" + entity.replace(" ", "_"))
-                linked[entity] = [{"uri": uri, "score": 1.0, "source": "heuristic"}]
-        return linked
-
-    def _disambiguate_entity(self, question, mention, candidates, model=None):
-        """Use LLM to pick the most contextually appropriate entity from Redis candidates.
-
-        Falls back to the original candidate list if the LLM call fails or returns
-        an invalid response.
-        """
-        if not candidates or len(candidates) == 1:
-            return candidates
-
-        candidate_list = "\n".join(
-            f"{i + 1}. {c['uri']} (score: {c['score']})"
-            for i, c in enumerate(candidates)
-        )
-        prompt = DISAMBIGUATION_PROMPT.format(
-            question=question,
-            mention=mention,
-            candidates=candidate_list,
-        )
-        try:
-            for dis_attempt in range(3):
-                response = self.client.chat.completions.create(
-                    model=model or DEFAULT_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                    max_tokens=10,
-                )
-                answer = response.choices[0].message.content
-                if answer is not None:
-                    break
-                print(f"[LLM] Disambiguation response was None, retrying (attempt {dis_attempt+1}/3)...")
-            if answer is None:
-                return candidates
-            idx = int(answer.strip()) - 1
-            if 0 <= idx < len(candidates):
-                selected = candidates.pop(idx)
-                candidates.insert(0, selected)
-        except Exception:
-            pass
-        return candidates
-
-    def _lookup_ontology(self, concepts):
-        """Step 3: Look up relevant ontology terms for each concept.
-
-        Each concept is looked up in the Nomic index, then enriched with
-        rdfs:domain and rdfs:range from the OWL ontology via Schema Introspector.
-        """
-        ontology = {}
-        for concept in concepts:
-            results = lookup_term(concept)
-            results = schema_introspector.enrich(results)
-            ontology[concept] = results
-        return ontology
-
-    def _format_entity_context(self, linked_entities):
-        """Format linked entities for LLM prompts."""
-        return _format_entity_context(linked_entities)
-
-    def _format_ontology_context(self, ontology_terms):
-        """Format ontology lookup results for LLM prompts.
-
-        Separates Properties (use as predicates) from Classes (use for rdf:type only).
-        Shows rdfs:domain and rdfs:range for each property candidate from Schema Introspector.
-        """
-        return _format_ontology_context(ontology_terms)
-
-    def _generate_sparql(self, question, linked_entities, ontology_terms, analysis, model=None):
-        """Step 4: Use LLM to generate SPARQL given all the context."""
-        entity_context = self._format_entity_context(linked_entities)
-        ontology_context = self._format_ontology_context(ontology_terms)
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Generate a SPARQL query for this question.\n\n"
-                    f"Question: {question}\n\n"
-                    f"Answer type: {analysis.get('answer_type', 'unknown')}\n"
-                    f"Aggregator: {analysis.get('aggregator', 'NONE')}\n"
-                    f"Join type: {analysis.get('join_type', 'SINGLE')}\n"
-                    f"Has type filter: {analysis.get('has_type_filter', False)}\n\n"
-                    f"Linked entities:\n{entity_context}\n"
-                    f"Relevant ontology terms:\n{ontology_context}\n"
-                    f"Output ONLY the SPARQL query."
-                ),
-            },
-        ]
-        response = _chat(self.client, messages, model=model)
-        return _extract_sparql(response)
-
-    def _revise_sparql(self, question, sparql, exec_result, linked_entities, ontology_terms, analysis, model=None):
-        """Ask the LLM to revise a failed SPARQL query based on execution feedback."""
-        entity_context = self._format_entity_context(linked_entities)
-        ontology_context = self._format_ontology_context(ontology_terms)
-
-        # Build execution summary
-        if exec_result["type"] == "error":
-            exec_summary = f"Error: {exec_result['message']}"
-            problem = "a SPARQL error"
-        elif exec_result["type"] == "select" and exec_result["total"] == 0:
-            exec_summary = "The query executed successfully but returned 0 results."
-            problem = "0 results — the data is likely modelled differently than expected"
-        else:
-            exec_summary = json.dumps(exec_result, default=str)
-            problem = "unexpected results"
-
-        prompt = REVISION_PROMPT.format(
-            problem=problem,
-            question=question,
-            sparql=sparql,
-            exec_summary=exec_summary,
-            entity_context=entity_context,
-            ontology_context=ontology_context,
-        )
-
-        messages = [{"role": "user", "content": prompt}]
-        response = _chat(self.client, messages, model=model)
-        return _extract_sparql(response)
-
-    def _verify_and_revise(self, question, sparql, linked_entities, ontology_terms, analysis, model=None):
-        """Execute query with deterministic dbo->dbp fallback then LLM revision.
-
-        Steps:
-          1. Execute original dbo: query.
-          2. If 0 results: swap dbo->dbp deterministically and retry.
-          3. If still 0 results: LLM revision up to MAX_RETRIES times.
-        """
-        # Step 1: initial execution
-        result = execute_sparql(sparql)
-        needs_fix, reason = _needs_revision(result)
-
-        if not needs_fix:
-            return sparql, result, 1
-
-        # Step 2: deterministic dbo->dbp swap
-        swapped = _swap_dbo_to_dbp(sparql)
-        if swapped != sparql:
-            logger.info("Retrying with dbo->dbp namespace swap...")
-            result = execute_sparql(swapped)
-            needs_fix, reason = _needs_revision(result)
-            if not needs_fix:
-                return swapped, result, 2
-            sparql = swapped  # continue LLM revision from swapped query
-
-        # Step 3: LLM-based revision
-        for attempt in range(MAX_RETRIES):
-            logger.info(f"LLM revision attempt {attempt + 1}: {reason}...")
-            sparql = self._revise_sparql(
-                question, sparql, result, linked_entities, ontology_terms, analysis, model=model
-            )
-            logger.info(f"Revised SPARQL: {sparql}")
-            result = execute_sparql(sparql)
-            needs_fix, reason = _needs_revision(result)
-            if not needs_fix:
-                return sparql, result, attempt + 3
-
-        logger.info(f"Max retries reached, returning last query despite {reason}")
-        return sparql, result, MAX_RETRIES + 2
-
-    def _answer_sequential(self, question, model=None):
-        """Sequential pipeline fallback used by CorporateKGQAAgent subclass.
-
-        CorporateKGQAAgent overrides _link_entities, _lookup_ontology,
-        _generate_sparql, _revise_sparql and _verify_and_revise. These overrides
-        are bypassed when using build_graph() since the graph calls standalone
-        node functions directly. This method preserves the old sequential flow
-        so subclass overrides continue to work correctly.
-        """
-        logger.info(f"Processing question (sequential): {question}")
-
-        analysis = self._analyse_question(question, model=model)
-        logger.info(f"Analysis: {analysis}")
-
-        entities = analysis.get("entities", [])
-        concepts = analysis.get("concepts", [])
-
-        linked_entities = self._link_entities(entities, question=question, model=model)
-        logger.info(f"Linked entities: {linked_entities}")
-
-        ontology_terms = self._lookup_ontology(concepts)
-        logger.info(f"Ontology terms found for {len(ontology_terms)} concepts")
-
-        sparql = self._generate_sparql(question, linked_entities, ontology_terms, analysis, model=model)
-        logger.info(f"Generated SPARQL: {sparql}")
-
-        sparql, exec_result, attempts = self._verify_and_revise(
-            question, sparql, linked_entities, ontology_terms, analysis, model=model
-        )
-        if attempts > 0:
-            logger.info(f"Query revised {attempts} time(s)")
-
-        return sparql
-
     def answer(self, question, model=None):
-        """Full pipeline: question -> SPARQL query.
-
-        For KGQAAgent instances uses the compiled LangGraph graph.
-        For subclasses (e.g. CorporateKGQAAgent) falls back to the sequential
-        pipeline so their method overrides are respected.
-        """
-        if type(self) is KGQAAgent:
-            logger.info(f"Processing question (graph): {question}")
-            graph  = build_graph(redis_el=self.redis_el, model=model)
-            result = graph.invoke({"question": question, "model": model,
-                                   "validator_attempts": 0, "exec_attempts": 0,
-                                   "probe_context": "", "probe_results": {},
-                                   "num_hops": 1})
-            return result.get("sparql_final") or result.get("sparql", "")
-        return self._answer_sequential(question, model=model)
+        """Full pipeline: question -> SPARQL query, via the compiled LangGraph graph."""
+        logger.info(f"Processing question (graph): {question}")
+        graph  = build_graph(redis_el=self.redis_el, model=model)
+        result = graph.invoke({"question": question, "model": model,
+                               "validator_attempts": 0, "exec_attempts": 0,
+                               "probe_context": "", "probe_results": {},
+                               "num_hops": 1})
+        return result.get("sparql_final") or result.get("sparql", "")
 
     def answer_stream(self, question, model=None):
         """Streaming pipeline that yields (step_name, data) tuples for each stage.
@@ -1133,10 +771,9 @@ class KGQAAgent:
         by calling the same standalone node functions build_graph() wires
         together, so the live step-by-step UI reflects the current production
         pipeline (num_hops, dead URI detection, two-hop probe chaining,
-        type-aware probe filtering) instead of a separate, older code path.
+        type-aware probe filtering) exactly as it runs everywhere else.
 
-        Event names, step ids, and payload shapes are kept identical to the
-        previous implementation so the existing frontend JS needs no changes.
+        Event names, step ids, and payload shapes match what the frontend JS expects.
         """
         model  = model or DEFAULT_MODEL
         client = self.client
