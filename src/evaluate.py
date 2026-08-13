@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate the agentic KGQA pipeline against DB25 or DB26 or QALD-9-Plus benchmark.
+"""Evaluate the agentic KGQA pipeline against DB25 or DB26 benchmark.
 
 All generated SPARQL queries run against the DBpedia evaluation endpoint.
 Gold results for DB26 are read from a pre-computed cache (data/db26_gold_final.json)
@@ -34,8 +34,6 @@ DATA_DIR       = _REPO_ROOT / "data"
 EVALS_DIR      = DATA_DIR / "evals"
 GOLD_CACHE_DB26 = DATA_DIR / "db26_gold_final.json"
 GOLD_CACHE_DB25 = DATA_DIR / "db25_gold_final.json"
-GOLD_CACHE_QALD9PLUS = DATA_DIR / "qald9plus_gold_final.json"
-BENCHMARK_QALD9PLUS  = _REPO_ROOT / "benchmark" / "questions_qald9plus.json"
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 JUDGE_MODEL = "anthropic/claude-sonnet-4.6"
@@ -44,7 +42,6 @@ ENDPOINT    = "http://research.liberai.org:7878/sparql"
 # ─── Gold cache ───────────────────────────────────────────────────────────────
 _gold_cache_db26 = None
 _gold_cache_db25 = None
-_gold_cache_qald9plus = None
 
 
 def _load_gold_cache_db26() -> dict:
@@ -91,26 +88,6 @@ def _load_gold_cache_db25() -> dict:
     return _gold_cache_db25
 
 
-def _load_gold_cache_qald9plus() -> dict:
-    """Load pre-computed QALD-9-Plus gold results from data/qald9plus_gold_final.json.
-
-    Returns {question_id: gold_result_dict}. Falls back to live execution
-    if the cache file does not exist -- run scripts/build_qald9plus_gold.py first.
-    """
-    global _gold_cache_qald9plus
-    if _gold_cache_qald9plus is not None:
-        return _gold_cache_qald9plus
-    if not GOLD_CACHE_QALD9PLUS.exists():
-        print(f"[WARN] Gold cache not found at {GOLD_CACHE_QALD9PLUS}. "
-              f"Run scripts/build_qald9plus_gold.py to build it.")
-        _gold_cache_qald9plus = {}
-        return _gold_cache_qald9plus
-    with open(GOLD_CACHE_QALD9PLUS) as f:
-        data = json.load(f)
-    _gold_cache_qald9plus = {q["id"]: q["gold_result"] for q in data.get("questions", [])}
-    return _gold_cache_qald9plus
-
-
 # ─── LLM client ───────────────────────────────────────────────────────────────
 def _get_judge_client():
     return OpenAI(
@@ -121,25 +98,6 @@ def _get_judge_client():
 
 # ─── Benchmark loader ─────────────────────────────────────────────────────────
 def load_benchmark(benchmark: str = "db26") -> list:
-    if benchmark == "qald9plus":
-        with open(BENCHMARK_QALD9PLUS) as f:
-            data = json.load(f)
-        seen_ids  = set()
-        questions = []
-        for q in data.get("questions", []):
-            qid    = str(q["id"])
-            sparql = q.get("query", {}).get("sparql", "").strip()
-            en_text = next(
-                (item["string"] for item in q.get("question", [])
-                 if item.get("language") == "en"),
-                ""
-            ).strip()
-            if not en_text or not sparql or qid in seen_ids:
-                continue
-            seen_ids.add(qid)
-            questions.append({"id": qid, "question": en_text, "expected_sparql": sparql})
-        return questions
-
     path = BENCHMARK_DB26 if benchmark == "db26" else BENCHMARK_DB25
     with open(path) as f:
         data = yaml.safe_load(f)
@@ -430,15 +388,12 @@ def evaluate_pipeline(
         else:
             gen_result = _execute_sparql(generated_sparql)
 
-        # Gold side: use pre-computed cache for db26, live execution for db25
+        # Gold side: use pre-computed cache for db26 and db25, live execution otherwise
         if benchmark == "db26":
             gold_cache = _load_gold_cache_db26()
             exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
         elif benchmark == "db25":
             gold_cache = _load_gold_cache_db25()
-            exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
-        elif benchmark == "qald9plus":
-            gold_cache = _load_gold_cache_qald9plus()
             exp_result = gold_cache.get(qid) or _execute_sparql(expected_sparql)
         else:
             exp_result = _execute_sparql(expected_sparql)
