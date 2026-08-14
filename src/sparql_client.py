@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Centralised SPARQL client.
 
-ALL pipeline queries go to DBPEDIA_SPARQL_ENDPOINT (configured in agent.py).
-This module is imported by query_executor.py and validator.py so they all
-share a single execution path and result format.
+ALL pipeline queries go to the ENDPOINT defined below. This module is
+imported by query_executor.py and validator.py so they all share a single
+execution path and result format.
 """
 
 import json
@@ -12,7 +12,7 @@ import urllib.request
 
 # All pipeline SPARQL queries go through this fixed endpoint.
 ENDPOINT = "http://research.liberai.org:7878/sparql"
-TIMEOUT  = 40  
+TIMEOUT  = 40
 
 
 def execute(sparql: str, timeout: int = TIMEOUT) -> dict:

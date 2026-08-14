@@ -335,39 +335,6 @@ def _extract_sparql(text):
     return text.strip()
 
 
-def _validate_sparql(sparql):
-    """Basic sanity check: a valid SPARQL query should contain at least one full URI."""
-    if not sparql:
-        return False
-    has_uri = "http://" in sparql or "https://" in sparql
-    # Check for degenerate patterns like "?x ." with nothing else in the triple
-    lines = [l.strip() for l in sparql.split("\n") if l.strip() and not l.strip().startswith("#")]
-    body = " ".join(lines)
-    # A WHERE clause with only a variable and a dot is broken
-    if re.search(r"\{\s*\?[a-zA-Z_]+\s*\.\s*\}", body):
-        return False
-    return has_uri
-
-
-def _needs_revision(exec_result):
-    """Check if a SPARQL execution result suggests the query needs revision."""
-    if exec_result["type"] == "error":
-        return True, "a SPARQL error"
-    if exec_result["type"] == "select":
-        if exec_result["total"] == 0:
-            return True, "0 results"
-        # Detect COUNT queries returning 0 (1 row with a "0" value)
-        rows = exec_result.get("rows", [])
-        if len(rows) == 1:
-            vals = list(rows[0].values())
-            if len(vals) == 1 and vals[0] in ("0", 0):
-                return True, "count returned 0"
-    if exec_result["type"] == "ask" and exec_result["result"] is False:
-        # ASK returning false might be correct — only flag if suspicious
-        return False, None
-    return False, None
-
-
 # ─── LangGraph State ─────────────────────────────────────────────────────────
 
 class KGQAState(TypedDict):
