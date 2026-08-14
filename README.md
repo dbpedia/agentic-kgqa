@@ -1,11 +1,20 @@
 # Agentic Question Answering over DBpedia
 
-A GSoC 2026 project that translates natural language questions into SPARQL queries against the DBpedia knowledge graph using an agentic LangGraph pipeline.
+| Project Details | |
+|---|---|
+| Contributor | Malla Siddharth Reddy |
+| Organization | DBpedia |
+| Mentors | Tommaso Soru, Ronit Banerjee, Gandharva Naveen, Abdulsobur |
+| Blog | https://mallasiddharthreddy.github.io/blogs/gsoc-26/ |
 
-**Contributor:** Malla Siddharth Reddy  
-**Organization:** DBpedia  
-**Mentors:** Tommaso Soru, Ronit Banerjee, Gandharva Naveen, Abdulsobur  
-**GSoC Blog (weekly blogs):** https://mallasiddharthreddy.github.io/blogs/gsoc-26/
+GSoC 2026 · DBpedia — an agentic LangGraph pipeline that translates natural language
+questions into SPARQL queries against the DBpedia knowledge graph, using live-probe
+grounding instead of a static dbp: index to recover from a wrong first guess.
+
+> **Text2SPARQL 2026 (DB26), 50 questions: F1 = 0.6119 with Claude Sonnet 4.6** — a 90%+
+> relative improvement over the pre-GSoC baseline (0.32), competitive with 2nd place on
+> the official leaderboard (0.614). F1 = 0.5109 with Qwen 3.5 122B, a ~65% improvement
+> over its own baseline (0.31).
 
 ---
 
@@ -20,32 +29,31 @@ The pipeline consists of six LangGraph nodes that run in sequence:
 5. **Query Executor** — Executes the query against the DBpedia endpoint with a class-safe deterministic dbo: to dbp: namespace swap as a first-level fallback
 6. **Validator** — Inspects the result and either passes, retries the Query Builder with live agentic probe context, or gives up
 
-The Validator node runs several checks and a two-stage agentic probe when a query fails:
+![Pipeline flow diagram](images/flow.png)
 
-- **Dead URI detection** — if a subject URI returns zero properties even from an unfiltered probe, the Validator checks for DBpedia disambiguation suffixes (e.g. `_(series)`) and retries with the cleaned URI instead of giving up
-- **Two-hop probe chaining** — for multi-hop questions (`num_hops >= 2`), the Validator resolves what the intermediate variable in the query actually binds to, and probes that entity too, not just the original subject. This recovers cases where the second-hop property only exists on the intermediate entity
-- **Type-aware probe filtering** — when probing the original subject of a multi-hop question, only properties with an actual resource-URI value are accepted, since that value needs to be usable as the subject of the next triple. A plain string value there could never be joined against
-- **Two-stage probe** — Stage 1 searches for dbp: properties matching the concept keyword on the subject entity, Stage 2 falls back to listing all dbp: properties for that entity
+The Validator runs a two-stage agentic probe when a query fails (Stage 1 keyword-filtered
+dbp: search on the subject, Stage 2 falls back to listing all dbp: properties for that
+entity), plus three targeted checks:
 
-Probe results are injected as grounded context into the Query Builder on retry.
+- **Dead URI detection** — if a subject URI returns zero properties even from an unfiltered probe, checks for DBpedia disambiguation suffixes (e.g. `_(series)`) and retries with the cleaned URI instead of giving up
+- **Two-hop probe chaining** — for multi-hop questions (`num_hops >= 2`), resolves what the intermediate variable in the query actually binds to and probes that entity too, not just the original subject
+- **Type-aware probe filtering** — when probing the original subject of a multi-hop question, only accepts properties with a resource-URI value, since that value needs to be usable as the subject of the next triple
 
-```
-Planner -> Entity Linker -> Ontology Explorer -> Query Builder -> Query Executor -> Validator
-                                                       ^                               |
-                                               retry_query_builder <-- probe_context  |
-                                               pass / give_up ----------------------> END
-```
+Probe results are injected as grounded context into the Query Builder on retry. See
+Architecture Decisions below for why each of these exists.
 
-A browser-based UI is also available for live demonstration, showing every step of the pipeline (including hop count, agentic probe results, and validator decisions) as it runs. See "Running the Pipeline" below.
+A browser-based UI is also available for live demonstration, showing every step of the
+pipeline (including hop count, agentic probe results, and validator decisions) as it
+runs. See "Run It" below.
 
 ---
 
 ## Requirements
 
 - Python 3.13
-- Redis server running locally (for entity linking)
-- OpenRouter API key (for LLM calls)
-- DBpedia evaluation endpoint access
+- Redis server (optional, for entity linking — see Setup)
+- OpenRouter API key (or any OpenAI-compatible provider)
+- DBpedia SPARQL endpoint access
 
 ---
 
@@ -56,7 +64,7 @@ A browser-based UI is also available for live demonstration, showing every step 
 pipenv install
 ```
 
-**2. Set up environment variables:**
+**2. Environment variables:**
 
 Create a `.env` file in the project root:
 ```
@@ -71,31 +79,30 @@ provider (local, Bedrock, etc.), edit `_get_llm_client()` in `src/agent.py` and
 
 **3. Build the dbo ontology index:**
 
-The DBpedia OWL ontology file is included in the repo at `resources/dbpedia-20250806.owl.rdf` — no separate download needed. Run:
+The DBpedia OWL ontology file is included in the repo at `resources/dbpedia-20250806.owl.rdf`, no separate download needed.
 ```bash
 pipenv run python scripts/build_ontology_index.py
 ```
+Produces `data/nomic_embeddings_dbo.pt`, `data/nomic_uris_dbo.json`, `data/nomic_labels_dbo.json`.
 
-This produces `data/nomic_embeddings_dbo.pt`, `data/nomic_uris_dbo.json`, and `data/nomic_labels_dbo.json`.
+**4. Redis entity linking (optional):**
 
-**4. Set up Redis entity linking (optional):**
-
-The entity linker uses a Redis database pre-loaded with DBpedia surface forms. Contact the project maintainers for access, or refer to the DBpedia entity linking documentation. Redis is not strictly required: if unavailable, the pipeline falls back to constructing entity URIs directly from the name, with lower linking accuracy.
+Uses a Redis database pre-loaded with DBpedia surface forms. Contact the project
+maintainers for access, or refer to the DBpedia entity linking documentation. Not
+strictly required: without it, the pipeline falls back to constructing entity URIs
+directly from the name, with lower linking accuracy.
 
 **5. DBpedia endpoint:**
 
-All queries go to `http://research.liberai.org:7878/sparql`. To use a different endpoint, update the `ENDPOINT` constant in `src/sparql_client.py`, `src/evaluate.py`, `scripts/build_db26_gold.py`, and `scripts/build_db25_gold.py`.
+All queries go to `http://research.liberai.org:7878/sparql`. To point at a different
+endpoint, update the `ENDPOINT` constant in `src/sparql_client.py`, `src/evaluate.py`,
+`scripts/build_db26_gold.py`, and `scripts/build_db25_gold.py`.
 
 ---
 
-## Running the Pipeline
+## Run It
 
-**Single question (via the eval script):**
-```bash
-pipenv run python -m src.evaluate 1 deepseek/deepseek-v3.2 0 db26
-```
-
-**Single question (directly via Python):**
+**Single question:**
 ```bash
 pipenv run python -c "
 from src.agent import KGQAAgent
@@ -104,105 +111,71 @@ print(agent.answer('What is the birthplace of Keanu Reeves?'))
 "
 ```
 
-**Via the API (streaming UI):**
+**Streaming UI:**
 ```bash
 pipenv run uvicorn src.api:app --host 0.0.0.0 --port 8000 --reload
 ```
-Then open `http://localhost:8000` in your browser. Type a question and watch the pipeline's steps live — Planner analysis (including hop count and query metadata), entity linking, ontology lookup, generated SPARQL, executor fallback, validator decisions, and full agentic probe results, exactly as they print in the terminal.
+Open `http://localhost:8000`. Type a question and watch the pipeline's steps live —
+Planner analysis, entity linking, ontology lookup, generated SPARQL, executor fallback,
+validator decisions, and full agentic probe results, exactly as they print in the terminal.
 
----
-
-## Running Evaluations
-
-**Build the gold result cache first (run once):**
+**Evaluations:**
 ```bash
-# For DB26 (50 questions)
+# Build the gold result cache first (run once per benchmark)
 pipenv run python scripts/build_db26_gold.py
-
-# For DB25 (100 questions)
 pipenv run python scripts/build_db25_gold.py
-```
 
-This executes all gold SPARQL queries against the evaluation endpoint and caches the results to `data/db26_gold_final.json` and `data/db25_gold_final.json`. Building the cache eliminates gold-side timing variance between evaluation runs.
-
-**Run a full evaluation:**
-```bash
-# DB26, 50 questions, Claude
+# n_questions  model_id  start_index  benchmark
 pipenv run python -m src.evaluate 50 anthropic/claude-sonnet-4.6 0 db26
-
-# DB25, 100 questions, DeepSeek
 pipenv run python -m src.evaluate 100 deepseek/deepseek-v3.2 0 db25
-
-# DB26, starting from question 10, Qwen
-pipenv run python -m src.evaluate 40 qwen/qwen3.5-122b-a10b 10 db26
 ```
-
-Arguments: `n_questions  model_id  start_index  benchmark`
-
-Each run reports average F1, precision, recall, and average/median/mode of agent steps per question (a measure of how many retries the pipeline needed). Results are saved to `data/evals/eval_{benchmark}_{timestamp}.json`.
+Each run reports F1, precision, recall, and average/median/mode agent steps per
+question. Results save to `data/evals/eval_{benchmark}_{timestamp}.json`.
 
 ---
 
-## Benchmark Results
+## Results
 
-Evaluated on the Text2SPARQL 2026 DB26 benchmark (50 questions) using the dbo-only architecture with all pipeline improvements applied.
+| Benchmark | Model | Result-set match | Avg F1 |
+|---|---|---|---|
+| Text2SPARQL 2026 DB26 (50 Q) | Claude Sonnet 4.6 | 27/50 (54%) | **0.6119** |
+| Text2SPARQL 2026 DB26 (50 Q) | Qwen 3.5 122B | 22/50 (44%) | 0.5109 |
+| Text2SPARQL 2026 DB26 (50 Q) | LIBER-AI-CLAUDE (pre-GSoC baseline) | — | 0.32 |
+| Text2SPARQL 2026 DB26 (50 Q) | LIBER-AI-QWEN (pre-GSoC baseline) | — | 0.31 |
+| Text2SPARQL 2025 DB25 (100 Q) | DeepSeek v3.2 | 50/100 (50%) | 0.5538 |
 
-| Model | Result-set match | Avg F1 |
-|---|---|---|
-| Claude Sonnet 4.6 | 27/50 (54%) | 0.6119 |
-| Qwen 3.5 122B | 22/50 (44%) | 0.5109 |
-| DeepSeek v3.2 | 18/50 (36%) | 0.41 |
-| LIBER-AI-CLAUDE (pre-GSoC baseline) | — | 0.32 |
-| LIBER-AI-QWEN (pre-GSoC baseline) | — | 0.31 |
-
-The Claude Sonnet 4.6 result of F1=0.6119 is a 90% relative improvement over the LIBER-AI-CLAUDE pre-GSoC baseline (0.32), and is competitive with 2nd place on the official Text2SPARQL 2026 leaderboard (F1=0.614).
-
-Evaluated on Text2SPARQL 2025 DB25 benchmark (100 questions):
-
-| Model | Result-set match | Avg F1 |
-|---|---|---|
-| DeepSeek v3.2 | 50/100 (50%) | 0.5538 |
-
-Note: several DB25 gold queries have compatibility issues with the evaluation endpoint (invalid SPARQL COUNT/SUM syntax in the gold queries, and a few genuine full-scan timeouts). These questions automatically score 0, so the true pipeline performance on well-formed questions is somewhat higher than the aggregate F1 suggests.
+Claude's F1 = 0.6119 is a 90% relative improvement over the LIBER-AI-CLAUDE baseline and
+competitive with 2nd place on the official Text2SPARQL 2026 leaderboard (F1 = 0.614).
+Several DB25 gold queries have compatibility issues with the evaluation endpoint
+(invalid SPARQL COUNT/SUM syntax, a few genuine full-scan timeouts), so true pipeline
+performance on well-formed DB25 questions is somewhat higher than the aggregate suggests.
 
 Full raw output for all three final runs is in `eval-results/`. For a per-question
-breakdown of every DB26 failure on Claude and Qwen, including a categorised analysis
-of what is causing each one, see `docs/final-results-analysis.md`.
+breakdown of every DB26 failure on Claude and Qwen, a categorised analysis of the cause,
+and what would move F1 beyond the current best, see `docs/final-results-analysis.md`.
 
 ---
 
-## Project Structure
+## Repository Layout
 
-```
-agentic-kgqa/
-├── src/
-│   ├── agent.py              # LangGraph pipeline, all node functions, KGQAState
-│   ├── sparql_client.py      # Centralised SPARQL execution
-│   ├── query_executor.py     # Query execution with dbo->dbp swap
-│   ├── validator.py          # Validator node: agentic probe, dead URI detection,
-│   │                         #   two-hop probe chaining, type-aware filtering
-│   ├── ontology_lookup.py    # dbo: embedding index lookup (Nomic Embed v1.5)
-│   ├── schema_introspector.py # OWL metadata enrichment (domain, range, label)
-│   ├── entity_linking.py     # Redis-based entity linking
-│   ├── evaluate.py           # Evaluation harness with P/R/F1 and steps metrics
-│   └── api.py                # FastAPI streaming endpoint + web UI
-├── scripts/
-│   ├── build_ontology_index.py  # Build dbo: Nomic embedding index
-│   ├── build_db26_gold.py       # Pre-compute DB26 gold result cache
-│   └── build_db25_gold.py       # Pre-compute DB25 gold result cache
-├── benchmark/
-│   ├── questions_db26.yml    # Text2SPARQL 2026 benchmark (50 questions)
-│   └── questions_db25.yaml   # Text2SPARQL 2025 benchmark (100 questions)
-├── resources/
-│   └── dbpedia-20250806.owl.rdf  # DBpedia OWL ontology file (included in repo)
-├── eval-results/              # Full raw output of the final confirmed evaluation runs
-│   ├── claude-db26-full-final.json
-│   ├── qwen-db26-full-final.json
-│   └── DeepSeek-db25-full-final.json
-├── data/                     # Index files, gold caches, eval results will be stored here once you run the steps above (gitignored)
-└── docs/
-    └── final-results-analysis.md  # Per-question failure analysis for Claude and Qwen on DB26
-```
+| Path | What |
+|---|---|
+| `src/agent.py` | LangGraph pipeline: all node functions, `KGQAState`, `build_graph()` |
+| `src/sparql_client.py` | Centralised SPARQL execution |
+| `src/query_executor.py` | Query execution with the dbo->dbp swap |
+| `src/validator.py` | Validator node: agentic probe, dead URI detection, two-hop probe chaining, type-aware filtering |
+| `src/ontology_lookup.py` | dbo: embedding index lookup (Nomic Embed v1.5) |
+| `src/schema_introspector.py` | OWL metadata enrichment (domain, range, label) |
+| `src/entity_linking.py` | Redis-based entity linking |
+| `src/evaluate.py` | Evaluation harness: P/R/F1 and steps metrics |
+| `src/api.py` | FastAPI streaming endpoint + web UI |
+| `scripts/` | Index and gold-cache build scripts |
+| `benchmark/` | Text2SPARQL DB26 and DB25 question sets |
+| `resources/dbpedia-20250806.owl.rdf` | DBpedia OWL ontology file (included in repo) |
+| `images/flow.png` | Pipeline flow diagram used in this README |
+| `eval-results/` | Full raw output of the three final confirmed evaluation runs |
+| `data/` | Index files, gold caches, eval results (gitignored, generated by Setup) |
+| `docs/final-results-analysis.md` | Per-question failure analysis for Claude and Qwen on DB26, and what's next |
 
 ---
 
@@ -221,6 +194,3 @@ agentic-kgqa/
 **Two-hop probe chaining:** For multi-hop questions, the original subject-only probe could never discover a second-hop property that only exists on the intermediate entity (e.g. a country's area, when the question starts from a university located in that country). The Validator now resolves what the intermediate variable actually binds to and probes that entity as well.
 
 **Type-aware probe filtering:** When probing the first hop of a multi-hop question, only properties with a resource-URI value are surfaced, since that value must be usable as the subject of the second triple. A plain string value found by the probe (e.g. a literal describing a unit's parent organisation) can never be joined further, so accepting it would only produce another failed retry.
-
----
-
