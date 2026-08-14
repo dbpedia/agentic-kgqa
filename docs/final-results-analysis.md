@@ -2,8 +2,9 @@
 
 Final confirmed evaluation results on DB26, the primary benchmark, with a question by
 question breakdown of every failure for Claude Sonnet 4.6 and Qwen 3.5 122B. Numbers are
-read directly from `data/evals/claude-db26-full-final.json` and
-`data/evals/qwen-db26-full-final.json`.
+read directly from `eval-results/claude-db26-full-final.json` and
+`eval-results/qwen-db26-full-final.json`, the full raw evaluation output committed to
+this repo.
 
 ---
 

@@ -165,6 +165,10 @@ Evaluated on Text2SPARQL 2025 DB25 benchmark (100 questions):
 
 Note: several DB25 gold queries have compatibility issues with the evaluation endpoint (invalid SPARQL COUNT/SUM syntax in the gold queries, and a few genuine full-scan timeouts). These questions automatically score 0, so the true pipeline performance on well-formed questions is somewhat higher than the aggregate F1 suggests.
 
+Full raw output for all three final runs is in `eval-results/`. For a per-question
+breakdown of every DB26 failure on Claude and Qwen, including a categorised analysis
+of what is causing each one, see `docs/final-results-analysis.md`.
+
 ---
 
 ## Project Structure
@@ -191,8 +195,13 @@ agentic-kgqa/
 │   └── questions_db25.yaml   # Text2SPARQL 2025 benchmark (100 questions)
 ├── resources/
 │   └── dbpedia-20250806.owl.rdf  # DBpedia OWL ontology file (included in repo)
+├── eval-results/              # Full raw output of the final confirmed evaluation runs
+│   ├── claude-db26-full-final.json
+│   ├── qwen-db26-full-final.json
+│   └── DeepSeek-db25-full-final.json
 ├── data/                     # Index files, gold caches, eval results will be stored here once you run the steps above (gitignored)
 └── docs/
+    └── final-results-analysis.md  # Per-question failure analysis for Claude and Qwen on DB26
 ```
 
 ---
