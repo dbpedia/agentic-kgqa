@@ -5,7 +5,7 @@ A GSoC 2026 project that translates natural language questions into SPARQL queri
 **Contributor:** Malla Siddharth Reddy  
 **Organization:** DBpedia  
 **Mentors:** Tommaso Soru, Ronit Banerjee, Gandharva Naveen, Abdulsobur  
-**Blog:** https://mallasiddharthreddy.github.io/blogs/gsoc-26/
+**GSoC Blog (weekly blogs):** https://mallasiddharthreddy.github.io/blogs/gsoc-26/
 
 ---
 
@@ -61,7 +61,13 @@ pipenv install
 Create a `.env` file in the project root:
 ```
 OPENROUTER_API_KEY=your_openrouter_api_key_here
+NEF_REDIS_HOST=your_redis_host
+NEF_REDIS_PORT=6379
+NEF_REDIS_PASSWORD=your_redis_password
 ```
+LLM calls go through OpenRouter by default. To use a different OpenAI-compatible
+provider (local, Bedrock, etc.), edit `_get_llm_client()` in `src/agent.py` and
+`_get_judge_client()` in `src/evaluate.py`.
 
 **3. Build the dbo ontology index:**
 
@@ -72,9 +78,13 @@ pipenv run python scripts/build_ontology_index.py
 
 This produces `data/nomic_embeddings_dbo.pt`, `data/nomic_uris_dbo.json`, and `data/nomic_labels_dbo.json`.
 
-**4. Set up Redis entity linking:**
+**4. Set up Redis entity linking (optional):**
 
-The entity linker uses a Redis database pre-loaded with DBpedia surface forms. Contact the project maintainers for access to the Redis dump, or refer to the DBpedia entity linking documentation.
+The entity linker uses a Redis database pre-loaded with DBpedia surface forms. Contact the project maintainers for access, or refer to the DBpedia entity linking documentation. Redis is not strictly required: if unavailable, the pipeline falls back to constructing entity URIs directly from the name, with lower linking accuracy.
+
+**5. DBpedia endpoint:**
+
+All queries go to `http://research.liberai.org:7878/sparql`. To use a different endpoint, update the `ENDPOINT` constant in `src/sparql_client.py`, `src/evaluate.py`, `scripts/build_db26_gold.py`, and `scripts/build_db25_gold.py`.
 
 ---
 
@@ -181,7 +191,7 @@ agentic-kgqa/
 │   └── questions_db25.yaml   # Text2SPARQL 2025 benchmark (100 questions)
 ├── resources/
 │   └── dbpedia-20250806.owl.rdf  # DBpedia OWL ontology file (included in repo)
-├── data/                     # Index files, gold caches, eval results (gitignored)
+├── data/                     # Index files, gold caches, eval results will be stored here once you run the steps above (gitignored)
 └── docs/
 ```
 
@@ -205,6 +215,3 @@ agentic-kgqa/
 
 ---
 
-## GSoC Blog
-
-Weekly coding blogs documenting progress: https://mallasiddharthreddy.github.io/blogs/gsoc-26/
