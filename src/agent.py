@@ -8,8 +8,6 @@ import logging
 import functools
 import unicodedata
 
-import urllib.parse
-import urllib.request
 from typing import TypedDict, Optional
 
 from langgraph.graph import StateGraph, END
@@ -17,19 +15,14 @@ from openai import OpenAI
 import dotenv
 
 from src.entity_linking import RedisEntityLinking
-from src.ontology_lookup import lookup_term, lookup_classes, lookup_properties
+from src.ontology_lookup import lookup_term
 from src import schema_introspector
-from src import sparql_client
 from src import query_executor as _query_executor
 from src import validator as _validator
 
 dotenv.load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
-
-DBPEDIA_SPARQL_ENDPOINT = "http://research.liberai.org:7878/sparql"
-
-PROMPT_VERSION = "v9"
 
 SYSTEM_PROMPT = """\
 You are a SPARQL query generation agent for DBpedia (2015-10 snapshot).

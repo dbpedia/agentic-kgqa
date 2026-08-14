@@ -10,9 +10,7 @@ import json
 import urllib.parse
 import urllib.request
 
-# Endpoint is configured in agent.py and injected at import time via
-# the module-level ENDPOINT variable. Commit 5 switches this to the
-# evaluation Oxigraph server: http://research.liberai.org:7878/sparql
+# All pipeline SPARQL queries go through this fixed endpoint.
 ENDPOINT = "http://research.liberai.org:7878/sparql"
 TIMEOUT  = 40  
 
