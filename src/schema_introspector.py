@@ -8,7 +8,7 @@ attaches its own grounded context (the actual value found for that subject)
 directly -- no separate enrichment step is needed for them.
 
 Requires:
-    data/dbpedia-20250806.owl.rdf -- DBpedia OWL ontology file.
+    resources/dbpedia-20250806.owl.rdf -- DBpedia OWL ontology file (included in the repo).
 """
 
 from pathlib import Path
@@ -16,7 +16,7 @@ from pathlib import Path
 import rdflib
 from rdflib.namespace import RDFS
 
-OWL_FILE   = Path(__file__).parent.parent / "data" / "dbpedia-20250806.owl.rdf"
+OWL_FILE   = Path(__file__).parent.parent / "resources" / "dbpedia-20250806.owl.rdf"
 _owl_graph = None
 
 

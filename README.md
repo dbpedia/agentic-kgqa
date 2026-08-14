@@ -13,14 +13,21 @@ A GSoC 2026 project that translates natural language questions into SPARQL queri
 
 The pipeline consists of six LangGraph nodes that run in sequence:
 
-1. **Planner** — Analyses the question and extracts entities, concepts, answer type, aggregator, join type, and whether a type filter is needed
+1. **Planner** — Analyses the question and extracts entities, concepts, answer type, aggregator, join type, whether a type filter is needed, and the number of relationship hops (`num_hops`) required to answer the question
 2. **Entity Linker** — Maps entity mentions to DBpedia resource URIs using a Redis surface-form index with LLM disambiguation
 3. **Ontology Explorer** — Looks up the top-15 most semantically similar dbo: properties for each concept using a Nomic Embed v1.5 cosine index, then enriches each candidate with rdfs:domain, rdfs:range, and rdfs:label from the DBpedia OWL ontology file via the Schema Introspector
-4. **Query Builder** — Generates a SPARQL query using the linked entities and ontology candidates
+4. **Query Builder** — Generates a SPARQL query using the linked entities and ontology candidates, treating `num_hops` from the Planner as a hard constraint on query structure
 5. **Query Executor** — Executes the query against the DBpedia endpoint with a class-safe deterministic dbo: to dbp: namespace swap as a first-level fallback
 6. **Validator** — Inspects the result and either passes, retries the Query Builder with live agentic probe context, or gives up
 
-The Validator node runs a two-stage agentic probe when a query fails: Stage 1 searches for dbp: properties matching the concept keyword on the subject entity, Stage 2 falls back to listing all dbp: properties for that entity. Probe results are injected as grounded context into the Query Builder on retry.
+The Validator node runs several checks and a two-stage agentic probe when a query fails:
+
+- **Dead URI detection** — if a subject URI returns zero properties even from an unfiltered probe, the Validator checks for DBpedia disambiguation suffixes (e.g. `_(series)`) and retries with the cleaned URI instead of giving up
+- **Two-hop probe chaining** — for multi-hop questions (`num_hops >= 2`), the Validator resolves what the intermediate variable in the query actually binds to, and probes that entity too, not just the original subject. This recovers cases where the second-hop property only exists on the intermediate entity
+- **Type-aware probe filtering** — when probing the original subject of a multi-hop question, only properties with an actual resource-URI value are accepted, since that value needs to be usable as the subject of the next triple. A plain string value there could never be joined against
+- **Two-stage probe** — Stage 1 searches for dbp: properties matching the concept keyword on the subject entity, Stage 2 falls back to listing all dbp: properties for that entity
+
+Probe results are injected as grounded context into the Query Builder on retry.
 
 ```
 Planner -> Entity Linker -> Ontology Explorer -> Query Builder -> Query Executor -> Validator
@@ -28,6 +35,8 @@ Planner -> Entity Linker -> Ontology Explorer -> Query Builder -> Query Executor
                                                retry_query_builder <-- probe_context  |
                                                pass / give_up ----------------------> END
 ```
+
+A browser-based UI is also available for live demonstration, showing every step of the pipeline (including hop count, agentic probe results, and validator decisions) as it runs. See "Running the Pipeline" below.
 
 ---
 
@@ -56,7 +65,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key_here
 
 **3. Build the dbo ontology index:**
 
-Download the DBpedia OWL ontology file and place it at `data/dbpedia-20250806.owl.rdf`, then run:
+The DBpedia OWL ontology file is included in the repo at `resources/dbpedia-20250806.owl.rdf` — no separate download needed. Run:
 ```bash
 pipenv run python scripts/build_ontology_index.py
 ```
@@ -89,7 +98,7 @@ print(agent.answer('What is the birthplace of Keanu Reeves?'))
 ```bash
 pipenv run uvicorn src.api:app --host 0.0.0.0 --port 8000 --reload
 ```
-Then open `http://localhost:8000` in your browser.
+Then open `http://localhost:8000` in your browser. Type a question and watch the pipeline's steps live — Planner analysis (including hop count and query metadata), entity linking, ontology lookup, generated SPARQL, executor fallback, validator decisions, and full agentic probe results, exactly as they print in the terminal.
 
 ---
 
@@ -108,8 +117,8 @@ This executes all gold SPARQL queries against the evaluation endpoint and caches
 
 **Run a full evaluation:**
 ```bash
-# DB26, 50 questions, DeepSeek
-pipenv run python -m src.evaluate 50 deepseek/deepseek-v3.2 0 db26
+# DB26, 50 questions, Claude
+pipenv run python -m src.evaluate 50 anthropic/claude-sonnet-4.6 0 db26
 
 # DB25, 100 questions, DeepSeek
 pipenv run python -m src.evaluate 100 deepseek/deepseek-v3.2 0 db25
@@ -120,28 +129,31 @@ pipenv run python -m src.evaluate 40 qwen/qwen3.5-122b-a10b 10 db26
 
 Arguments: `n_questions  model_id  start_index  benchmark`
 
-Results are saved to `data/evals/eval_{benchmark}_{timestamp}.json`.
+Each run reports average F1, precision, recall, and average/median/mode of agent steps per question (a measure of how many retries the pipeline needed). Results are saved to `data/evals/eval_{benchmark}_{timestamp}.json`.
 
 ---
 
 ## Benchmark Results
 
-Evaluated on the Text2SPARQL 2026 DB26 benchmark (50 questions) using the dbo-only architecture.
+Evaluated on the Text2SPARQL 2026 DB26 benchmark (50 questions) using the dbo-only architecture with all pipeline improvements applied.
 
 | Model | Result-set match | Avg F1 |
 |---|---|---|
-| Claude Sonnet 4.6 | 24/50 (48%) | 0.55 |
-| Qwen 3.5 122B | 21/50 (42%) | 0.45 |
+| Claude Sonnet 4.6 | 27/50 (54%) | 0.6119 |
+| Qwen 3.5 122B | 22/50 (44%) | 0.5109 |
 | DeepSeek v3.2 | 18/50 (36%) | 0.41 |
-| LIBER-AI-CLAUDE (baseline) | — | 0.32 |
+| LIBER-AI-CLAUDE (pre-GSoC baseline) | — | 0.32 |
+| LIBER-AI-QWEN (pre-GSoC baseline) | — | 0.31 |
+
+The Claude Sonnet 4.6 result of F1=0.6119 is a 90% relative improvement over the LIBER-AI-CLAUDE pre-GSoC baseline (0.32), and is competitive with 2nd place on the official Text2SPARQL 2026 leaderboard (F1=0.614).
 
 Evaluated on Text2SPARQL 2025 DB25 benchmark (100 questions):
 
 | Model | Result-set match | Avg F1 |
 |---|---|---|
-| DeepSeek v3.2 | 46/100 (46%) | 0.53 |
+| DeepSeek v3.2 | 50/100 (50%) | 0.5538 |
 
-Note: 14 DB25 gold queries have compatibility issues with the evaluation endpoint (11 use invalid SPARQL COUNT/SUM syntax, 3 are genuine full-scan timeouts). These questions automatically score 0.
+Note: several DB25 gold queries have compatibility issues with the evaluation endpoint (invalid SPARQL COUNT/SUM syntax in the gold queries, and a few genuine full-scan timeouts). These questions automatically score 0, so the true pipeline performance on well-formed questions is somewhat higher than the aggregate F1 suggests.
 
 ---
 
@@ -153,11 +165,12 @@ agentic-kgqa/
 │   ├── agent.py              # LangGraph pipeline, all node functions, KGQAState
 │   ├── sparql_client.py      # Centralised SPARQL execution
 │   ├── query_executor.py     # Query execution with dbo->dbp swap
-│   ├── validator.py          # Validator node with agentic probe
+│   ├── validator.py          # Validator node: agentic probe, dead URI detection,
+│   │                         #   two-hop probe chaining, type-aware filtering
 │   ├── ontology_lookup.py    # dbo: embedding index lookup (Nomic Embed v1.5)
 │   ├── schema_introspector.py # OWL metadata enrichment (domain, range, label)
 │   ├── entity_linking.py     # Redis-based entity linking
-│   ├── evaluate.py           # Evaluation harness with P/R/F1 metrics
+│   ├── evaluate.py           # Evaluation harness with P/R/F1 and steps metrics
 │   └── api.py                # FastAPI streaming endpoint + web UI
 ├── scripts/
 │   ├── build_ontology_index.py  # Build dbo: Nomic embedding index
@@ -166,6 +179,8 @@ agentic-kgqa/
 ├── benchmark/
 │   ├── questions_db26.yml    # Text2SPARQL 2026 benchmark (50 questions)
 │   └── questions_db25.yaml   # Text2SPARQL 2025 benchmark (100 questions)
+├── resources/
+│   └── dbpedia-20250806.owl.rdf  # DBpedia OWL ontology file (included in repo)
 ├── data/                     # Index files, gold caches, eval results (gitignored)
 └── docs/
 ```
@@ -179,6 +194,14 @@ agentic-kgqa/
 **Agentic probe over static dbp: index:** Instead of embedding 49k dbp: properties with AI-generated labels (not reproducible at scale), the Validator queries the live endpoint to discover which dbp: properties actually have data for a given subject entity. This grounds the Query Builder's retry in real confirmed data rather than embedding similarity.
 
 **Class-safe dbo to dbp swap:** The deterministic namespace swap only rewrites lowerCamelCase property URIs. UpperCamelCase class URIs (used in rdf:type constraints) are left untouched since no dbp: equivalent exists for classes like dbo:FictionalCharacter.
+
+**num_hops as an explicit Planner field:** Multi-hop questions were sometimes collapsed into a single triple when the Query Builder inferred hop count purely from natural language phrasing. The Planner now explicitly outputs `num_hops`, and the Query Builder treats it as a hard constraint (e.g. `num_hops=2` must produce exactly two triples connected by an intermediate variable), removing this class of structural error.
+
+**Dead URI detection:** When the Entity Linker falls back to a heuristic URI construction (on a Redis miss) and that heuristic includes a DBpedia disambiguation suffix like `_(series)`, the constructed URI can point to a non-existent resource. The Validator detects this — when the unfiltered probe finds zero properties for a subject — strips the suffix, and retries with the cleaned canonical URI.
+
+**Two-hop probe chaining:** For multi-hop questions, the original subject-only probe could never discover a second-hop property that only exists on the intermediate entity (e.g. a country's area, when the question starts from a university located in that country). The Validator now resolves what the intermediate variable actually binds to and probes that entity as well.
+
+**Type-aware probe filtering:** When probing the first hop of a multi-hop question, only properties with a resource-URI value are surfaced, since that value must be usable as the subject of the second triple. A plain string value found by the probe (e.g. a literal describing a unit's parent organisation) can never be joined further, so accepting it would only produce another failed retry.
 
 ---
 

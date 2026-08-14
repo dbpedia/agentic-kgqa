@@ -9,7 +9,7 @@ dbo->dbp namespace swap (Query Executor) and the live agentic probe
 (Validator), which is simpler and was shown in a controlled comparison to be
 statistically equivalent to maintaining a separate AI-labelled dbp: index.
 
-Source: dbo: properties and Classes, parsed from data/dbpedia-20250806.owl.rdf
+Source: dbo: properties and Classes, parsed from resources/dbpedia-20250806.owl.rdf
 using RDFLib. The OWL file is also used by the Schema Introspector for
 domain/range lookup, making it the single source for all dbo work.
 
@@ -41,8 +41,9 @@ from sentence_transformers import SentenceTransformer
 
 BASE_DIR = Path(__file__).parent.parent           # agentic-kgqa/
 DATA_DIR = BASE_DIR / "data"
+RESOURCES_DIR = BASE_DIR / "resources"
 
-OWL_FILE = DATA_DIR / "dbpedia-20250806.owl.rdf"
+OWL_FILE = RESOURCES_DIR / "dbpedia-20250806.owl.rdf"
 
 EMBEDDINGS_PATH = DATA_DIR / "nomic_embeddings_dbo.pt"
 URIS_PATH       = DATA_DIR / "nomic_uris_dbo.json"
