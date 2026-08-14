@@ -2,7 +2,7 @@
 
 | Project Details | |
 |---|---|
-| Contributor | Malla Siddharth Reddy |
+| Contributor | [Malla Siddharth Reddy](https://github.com/mallasiddharthreddy) |
 | Organization | DBpedia |
 | Mentors | Tommaso Soru, Ronit Banerjee, Gandharva Naveen, Abdulsobur |
 | Blog | https://mallasiddharthreddy.github.io/blogs/gsoc-26/ |
