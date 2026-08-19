@@ -1,142 +1,104 @@
 #!/usr/bin/env python3
-"""Ontology term lookup using precomputed embeddings and gensim KeyedVectors."""
+"""Ontology term lookup using a Nomic Embed v1.5 index over the curated dbo: ontology.
+
+dbo: only -- pure cosine similarity over the pre-built dbo index.
+
+dbp: properties are NOT statically embedded or pre-ranked. They only ever
+enter the pipeline via two mechanisms, both of which work against live data:
+  1. The deterministic class-safe dbo->dbp namespace swap in query_executor.py
+  2. The live agentic probe in validator.py, which queries the SPARQL endpoint
+     directly to find which dbp: properties have data for a given subject.
+
+This is a deliberate simplification from an earlier two-index approach
+that also embedded ~49k dbp: properties with AI-generated labels. That approach
+was dropped because: (a) AI-labelling at that scale is not scientifically
+defensible, and (b) a controlled before/after comparison on the
+DB26 benchmark showed the two approaches were statistically indistinguishable
+once timeout noise and a swap bug were fixed. 
+
+Index files (built by scripts/build_ontology_index.py):
+    data/nomic_embeddings_dbo.pt  -- PyTorch tensor [N, 768]
+    data/nomic_uris_dbo.json      -- list of N URIs
+    data/nomic_labels_dbo.json    -- list of N labels
+"""
 
 import json
-import os
-import numpy as np
-from gensim.models import KeyedVectors
-from openai import OpenAI
-import dotenv
+from pathlib import Path
 
-dotenv.load_dotenv(override=True)
+import torch
+from sentence_transformers import SentenceTransformer, util
 
-# Singleton instances
-_client = None
-_model = None
-_ontology_terms = None
-_predicate_freqs = None
+_DATA_DIR      = Path(__file__).parent.parent / "data"
+_EMBEDDINGS    = _DATA_DIR / "nomic_embeddings_dbo.pt"
+_URIS          = _DATA_DIR / "nomic_uris_dbo.json"
+_LABELS        = _DATA_DIR / "nomic_labels_dbo.json"
+
+_nomic_model   = None
+_embeddings    = None
+_uris          = None
+_labels        = None
 
 
-def _get_client():
-    global _client
-    if _client is None:
-        _client = OpenAI(
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            base_url="https://openrouter.ai/api/v1",
+def _load_index():
+    global _nomic_model, _embeddings, _uris, _labels
+    if _embeddings is not None:
+        return
+
+    if not _EMBEDDINGS.exists():
+        raise FileNotFoundError(
+            f"dbo index not found at {_EMBEDDINGS}.\n"
+            "Run: pipenv run python scripts/build_ontology_index.py"
         )
-    return _client
+
+    device       = "cuda" if torch.cuda.is_available() else "cpu"
+    _nomic_model = SentenceTransformer(
+        "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True, device=device
+    )
+    _embeddings  = torch.load(str(_EMBEDDINGS), map_location=device, weights_only=True)
+    with open(_URIS) as f:
+        _uris = json.load(f)
+    with open(_LABELS) as f:
+        _labels = json.load(f)
 
 
-def _get_model():
-    global _model
-    if _model is None:
-        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-        vectors_path = os.path.join(data_dir, "ontology-vectors.w2v")
-        _model = KeyedVectors.load_word2vec_format(vectors_path)
-    return _model
+def lookup_term(term, k=15):
+    """Return top-k dbo: candidates for a concept, ranked by cosine similarity.
 
+    k=15 (widened from the earlier default of 10) to give the Query Builder a
+    deeper dbo: pool to choose from on the first attempt, compensating for the
+    removal of the static dbp: index.
 
-def _get_ontology_terms():
-    """Parse ontology terms from the w2v file keys."""
-    global _ontology_terms
-    if _ontology_terms is None:
-        model = _get_model()
-        _ontology_terms = {}
-        for key in model.key_to_index:
-            uri_type, uri = key.split("|", 1)
-            _ontology_terms[uri] = {"uri": uri, "type": uri_type, "key": key}
-    return _ontology_terms
-
-
-def _get_predicate_freqs():
-    """Load predicate frequency table (lazy, cached)."""
-    global _predicate_freqs
-    if _predicate_freqs is None:
-        freq_path = os.path.join(os.path.dirname(__file__), "..", "data", "predicate_frequencies.json")
-        if os.path.exists(freq_path):
-            with open(freq_path) as f:
-                _predicate_freqs = json.load(f)
-        else:
-            _predicate_freqs = {}
-    return _predicate_freqs
-
-
-def _embed_texts(texts, retries=2):
-    client = _get_client()
-    import time
-    for attempt in range(retries + 1):
-        try:
-            response = client.embeddings.create(
-                input=[f"Term: {text}" for text in texts],
-                model="text-embedding-3-small",
-            )
-            if not response.data:
-                raise ValueError("No embedding data received")
-            return [x.embedding for x in response.data]
-        except Exception as e:
-            if attempt < retries:
-                time.sleep(1)
-                continue
-            raise
-
-
-def lookup_term(term, classes=True, properties=True, k=5):
-    """Look up an ontology term by natural language description.
-
-    Returns a balanced list of dbo: and dbp: results (when both are available).
-    Each result is a dict with keys: uri, type, score, key.
+    Returns list of dicts: {uri, label, score, confidence_pct, source}
     """
-    model = _get_model()
-    ontology_terms = _get_ontology_terms()
-    term_emb = _embed_texts([term])[0]
+    _load_index()
+    query_embedding = _nomic_model.encode(
+        f"search_query: {term}", convert_to_tensor=True
+    )
+    cos_scores  = util.cos_sim(query_embedding, _embeddings)
+    top_results = torch.topk(cos_scores, k=min(k * 3, len(_uris)))
 
-    dbo_results = []  # Classes + dbo: properties
-    dbp_results = []  # dbp: properties
-
-    for entry, score in model.most_similar(positive=[np.array(term_emb)], topn=200):
-        uri_type, uri = entry.split("|", 1)
-        if uri_type == "Class" and not classes:
-            continue
-        if "Property" in uri_type and not properties:
-            continue
-
-        item = {"uri": uri, "type": uri_type, "score": round(score, 4), "key": entry}
-
-        if "dbpedia.org/property/" in uri:
-            if len(dbp_results) < k:
-                dbp_results.append(item)
-        else:
-            if len(dbo_results) < k:
-                dbo_results.append(item)
-
-        if len(dbo_results) >= k and len(dbp_results) >= k:
-            break
-
-    # Interleave: return top dbo results first, then top dbp results, up to k total
-    # This ensures the LLM sees both namespaces
     results = []
-    dbo_take = min(len(dbo_results), max(1, k // 2))
-    results.extend(dbo_results[:dbo_take])
-    remaining = k - len(results)
-    results.extend(dbp_results[:remaining])
-
-    # Sort by score descending for clean presentation
-    results.sort(key=lambda x: x["score"], reverse=True)
-    results = results[:k]
-
-    # Annotate with triple counts from the frequency table
-    freqs = _get_predicate_freqs()
-    for r in results:
-        r["triples"] = freqs.get(r["uri"], 0)
-
+    for score_t, idx_t in zip(top_results.values[0], top_results.indices[0]):
+        raw_cosine     = score_t.item()
+        confidence_pct = ((raw_cosine + 1) / 2) * 100
+        idx            = idx_t.item()
+        results.append({
+            "uri":            _uris[idx],
+            "label":          _labels[idx],
+            "score":          round(raw_cosine, 4),
+            "confidence_pct": round(confidence_pct, 1),
+            "source":         "dbo",
+        })
+        if len(results) >= k:
+            break
     return results
 
 
-def lookup_classes(term, k=5):
-    """Lookup only ontology classes."""
-    return lookup_term(term, classes=True, properties=False, k=k)
+def lookup_classes(term, k=15):
+    """Look up only ontology Classes (for rdf:type constraints)."""
+    return [r for r in lookup_term(term, k=k) if r["uri"].split("/")[-1][0].isupper()]
 
 
-def lookup_properties(term, k=5):
-    """Lookup only ontology properties."""
-    return lookup_term(term, classes=False, properties=True, k=k)
+def lookup_properties(term, k=15):
+    """Look up only ontology properties (for predicates)."""
+    return [r for r in lookup_term(term, k=k) if not r["uri"].split("/")[-1][0].isupper()]
