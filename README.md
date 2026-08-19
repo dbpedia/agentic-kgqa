@@ -1,4 +1,4 @@
-# Agentic Question Answering over DBpedia
+# GSoC 2026 : Agentic Question Answering over DBpedia
 
 | Project Details | |
 |---|---|
