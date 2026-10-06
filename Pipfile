@@ -5,7 +5,6 @@ name = "pypi"
 
 [packages]
 gensim = "*"
-rdflib = "*"
 openai = "*"
 dotenv = "*"
 redis = "*"
@@ -13,6 +12,14 @@ fastapi = "*"
 uvicorn = "*"
 pyyaml = "*"
 pandas = "*"
+requests = "*"
+torch = "*"
+sentence-transformers = "*"
+einops = "*"
+rdflib = "*"
+ollama = "*"
+aiohttp = "*"
+langgraph = "*"
 
 [dev-packages]
 ipykernel = "*"
