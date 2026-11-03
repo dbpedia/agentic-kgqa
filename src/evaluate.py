@@ -134,9 +134,11 @@ def _execute_sparql(sparql: str) -> dict:
         if "results" in data and "bindings" in data["results"]:
             bindings  = data["results"]["bindings"]
             variables = data.get("head", {}).get("vars", [])
+            # Keep every row: P/R/F1 are computed on these sets, so a cap would
+            # score only whichever rows the endpoint happened to return first.
             rows = [
                 {v: b[v].get("value", "") for v in variables if v in b}
-                for b in bindings[:200]
+                for b in bindings
             ]
             return {"type": "select", "vars": variables, "rows": rows, "total": len(bindings)}
         return {"type": "unknown", "raw": str(data)[:200]}

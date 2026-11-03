@@ -28,7 +28,6 @@ OUTPUT_FILE     = _REPO_ROOT / "data" / "db25_gold_final.json"
 ENDPOINT        = "http://research.liberai.org:7878/sparql"
 TIMEOUT         = 40    # seconds
 SLEEP_BETWEEN   = 0.5   # light pacing between requests
-MAX_ROWS        = 200   # row cap, matches sparql_client.py
 
 
 def _execute(sparql: str, timeout: int = TIMEOUT) -> dict:
@@ -54,7 +53,7 @@ def _execute(sparql: str, timeout: int = TIMEOUT) -> dict:
             variables = data.get("head", {}).get("vars", [])
             rows = [
                 {v: b[v].get("value", "") for v in variables if v in b}
-                for b in bindings[:MAX_ROWS]
+                for b in bindings  # no cap: gold rows are scored as a full set
             ]
             return {"type": "select", "vars": variables, "rows": rows, "total": len(bindings)}
 
