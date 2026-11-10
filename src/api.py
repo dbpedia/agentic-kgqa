@@ -2,6 +2,7 @@
 
 import json
 import logging
+from contextlib import asynccontextmanager
 
 import fastapi
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -14,8 +15,6 @@ MODEL_SLUGS = {m["id"].split("/")[-1]: m["id"] for m in MODELS}
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = fastapi.FastAPI(title="TEXT2SPARQL API - Agentic KGQA")
-
 KNOWN_DATASETS = [
     "https://text2sparql.aksw.org/2025/dbpedia/",
     "https://text2sparql.aksw.org/2026/dbpedia/",
@@ -24,11 +23,19 @@ KNOWN_DATASETS = [
 agent = None
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: fastapi.FastAPI):
     global agent
     agent = KGQAAgent()
     logger.info("DBpedia KGQA Agent initialised.")
+    yield
+    logger.info("DBpedia KGQA Agent shut down.")
+
+
+app = fastapi.FastAPI(
+    title="TEXT2SPARQL API - Agentic KGQA",
+    lifespan=lifespan,
+)
 
 
 # --- Challenge API endpoint (unchanged) ---
