@@ -102,6 +102,18 @@ endpoint, update the `ENDPOINT` constant in `src/sparql_client.py`, `src/evaluat
 
 ## Run It
 
+### Using Docker (Recommended - 1 Command)
+
+Start both the FastAPI streaming UI and Redis server in isolated containers:
+```bash
+docker compose up --build
+```
+Open `http://localhost:8000` to view the streaming pipeline UI.
+
+---
+
+### Local Environment
+
 **Single question:**
 ```bash
 pipenv run python -c "
