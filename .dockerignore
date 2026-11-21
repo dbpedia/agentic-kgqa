@@ -1,0 +1,33 @@
+# Version control & virtual environments
+.git/
+.gitignore
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local configuration & environment secrets
+.env
+.env.*
+*.local
+
+# IDE & Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Temporary outputs & logs
+*.log
+eval-results/*.tmp
+redis_entity_linking_results.csv
